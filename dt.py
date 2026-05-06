@@ -70,7 +70,6 @@ def run_tracker():
             )
 
 
-            
             fig.add_layout_image(dict(
                 source=img, xref="x", yref="y", x=0, y=height,
                 sizex=width, sizey=height, sizing="stretch", opacity=0.8, layer="below"
@@ -81,17 +80,26 @@ def run_tracker():
                               transition_duration=50) # Tell Plotly to animate markers
 
             # Create a stable container with a fixed height and width
+
+
+            # Create a stable container with a fixed height and width
             with placeholder.container():
-                # Use HTML to lock the dimensions of the plotting area
+                # 1. Start the HTML "box" (Match width to your figure)
                 st.markdown(
-                    '<div style="height:600px; width:900px;">', 
+                    '<div style="height:450px; width:650px;">', 
                     unsafe_allow_html=True
                 )
-                st.plotly_chart(fig, use_container_width=False)
+                
+                # 2. Only call this ONCE
+                st.plotly_chart(
+                    fig, 
+                    use_container_width=False, 
+                    config={'displayModeBar': False}
+                )
+                
+                # 3. Close the HTML "box"
                 st.markdown('</div>', unsafe_allow_html=True)
 
-                st.plotly_chart(fig, use_container_width=False, config={'displayModeBar': False})
-            
             time.sleep(0.05) # Control the "frame rate"
 
         st.session_state.current_pos = target_pos
