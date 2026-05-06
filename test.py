@@ -9,6 +9,19 @@ REGION = 'us-east-1'
 
 st.title("AWS SQS Message Reader")
 
+try:
+    sqs = boto3.client(
+        "sqs",
+        aws_access_key_id=st.secrets["AWS_ACCESS_KEY_ID"],
+        aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
+        region_name=st.secrets.get("AWS_DEFAULT_REGION", "us-east-1")
+    )
+except Exception:
+    st.error("AWS Credentials not found. Please add them to secrets.")
+
+
+
+
 # --- Initialize SQS Client ---
 @st.cache_resource
 def get_sqs_client():
