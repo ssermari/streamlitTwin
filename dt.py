@@ -102,7 +102,7 @@ def run_tracker():
                 )
                 
                 # 3. Close the HTML "box"
-                $st.markdown('</div>', unsafe_allow_html=True)
+                #st.markdown('</div>', unsafe_allow_html=True)
 
             time.sleep(0.05) # Control the "frame rate"
 
