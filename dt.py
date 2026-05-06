@@ -84,57 +84,48 @@ def get_new_target():
 
 # 5. Smoothing Fragment
 @st.fragment
+
 def run_tracker():
-    placeholder = st.empty()
-    steps = 15  # Increase for smoother movement, decrease for faster updates
+    # Create the single "slot" for the chart
+    chart_placeholder = st.empty()
+    steps = 15  
     
     while True:
         target_pos = get_new_target()
         start_pos = st.session_state.current_pos.copy()
 
-        # Animate transition
         for step in range(1, steps + 1):
             alpha = step / steps
             interim_df = start_pos.copy()
             
-            # Linear Interpolation
             interim_df['x'] = start_pos['x'] + (target_pos['x'] - start_pos['x']) * alpha
             interim_df['y'] = start_pos['y'] + (target_pos['y'] - start_pos['y']) * alpha
 
             fig = px.scatter(interim_df, x="x", y="y", text="robot_id", 
                              range_x=[0, width], range_y=[0, height])
 
-            # Visual Enhancements
-            fig.update_traces(
-                marker=dict(size=18, color='red', line=dict(width=2, color='white')),
-                textposition="top center",
-                textfont=dict(family="Arial Black", size=14, color="darkblue")
-            )
-
-            fig.add_layout_image(dict(
-                source=img, xref="x", yref="y", x=0, y=height,
-                sizex=width, sizey=height, sizing="stretch", opacity=0.8, layer="below"
-            ))
+            # ... [Keep your marker/font styling and add_layout_image code here] ...
 
             fig.update_layout(
                 width=1200, height=450, 
                 margin=dict(l=0, r=0, t=0, b=0),
                 xaxis_visible=False, yaxis_visible=False,
-                transition_duration=30 # Browser-level smoothing
+                transition_duration=30
             )
 
-            with placeholder.container():
-                st.plotly_chart(
-                    fig, 
-                    use_container_width=False, 
-                    theme=None,
-                    config={'displayModeBar': False},
-                    key="warehouse_map_v1" # Static key prevents duplicate element error
-                )
+            # FIX: Update the placeholder directly to replace the chart
+            chart_placeholder.plotly_chart(
+                fig, 
+                use_container_width=False, 
+                theme=None,
+                config={'displayModeBar': False},
+                # No key needed here because the placeholder handles the identity
+            )
 
             time.sleep(0.03) 
 
         st.session_state.current_pos = target_pos
+
 
 run_tracker()
 
