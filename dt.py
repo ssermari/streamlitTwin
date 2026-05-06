@@ -10,7 +10,7 @@ st.title("Warehouse Digital Twin - Live Robot Tracking")
 
 # 1. Load your floor plan image
 # Replace 'warehouse_floor.png' with your actual file path
-image_path = "warehouse_floor.png" 
+image_path = "wh.png" 
 img = Image.open(image_path)
 width, height = img.size
 
