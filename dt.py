@@ -60,7 +60,7 @@ if 'frame_count' not in st.session_state:
 
 def get_new_target():
     try:
-        response = sqs.receive_message(QueueUrl=QUEUE_URL, MaxNumberOfMessages=1, WaitTimeSeconds=1)
+        response = sqs.receive_message(QueueUrl=QUEUE_URL, MaxNumberOfMessages=1, WaitTimeSeconds=10)
         if 'Messages' in response:
             st.toast("New telematics data received from SQS!", icon="✅")
             msg = response['Messages'][0]
