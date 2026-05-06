@@ -48,15 +48,35 @@ def run_tracker():
             interim_df['x'] = start_pos['x'] + (target_pos['x'] - start_pos['x']) * alpha
             interim_df['y'] = start_pos['y'] + (target_pos['y'] - start_pos['y']) * alpha
 
+            # Create the figure
             fig = px.scatter(interim_df, x="x", y="y", text="robot_id", 
-                             range_x=[0, width], range_y=[0, height])
+                 range_x=[0, width], range_y=[0, height])
+
+            # Customize dots and labels for visibility
+            fig.update_traces(
+                # Make dots bigger and red
+                marker=dict(
+                    size=18, 
+                    color='red', 
+                    line=dict(width=2, color='white') # White outline helps them pop
+                ),
+                # Style the text labels
+                textposition="top center",
+                textfont=dict(
+                    family="Arial Black",
+                    size=14,
+                    color="darkblue" # Change label to dark blue
+                )
+            )
+
+
             
             fig.add_layout_image(dict(
                 source=img, xref="x", yref="y", x=0, y=height,
                 sizex=width, sizey=height, sizing="stretch", opacity=0.8, layer="below"
             ))
 
-            fig.update_layout(width=900, height=600, margin=dict(l=0, r=0, t=0, b=0),
+            fig.update_layout(width=600, height=400, margin=dict(l=0, r=0, t=0, b=0),
                               xaxis_visible=False, yaxis_visible=False,
                               transition_duration=50) # Tell Plotly to animate markers
 
