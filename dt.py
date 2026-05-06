@@ -83,34 +83,52 @@ def get_new_target():
     return st.session_state.current_pos
 
 # 5. Smoothing Fragment
-@st.fragment
 
+@st.fragment
 def run_tracker():
-    # Create the single "slot" for the chart
+    # 1. Define the placeholder INSIDE the fragment function
     chart_placeholder = st.empty()
+    
+    # 2. Add a frame counter to solve the Duplicate ID error
+    if 'frame_count' not in st.session_state:
+        st.session_state.frame_count = 0
+        
     steps = 15  
     
-
-    # Create a counter at the very top of your fragment
-    frame_counter = 0
-
     while True:
-        # ... your interpolation logic ...
+        target_pos = get_new_target()
+        start_pos = st.session_state.current_pos.copy()
+
         for step in range(1, steps + 1):
-            frame_counter += 1  # Increment this every single frame
-        
-            # ... your fig setup ...
-           # Use the placeholder to update, but provide a unique key for every frame
-            placeholder.plotly_chart(
+            st.session_state.frame_count += 1
+            alpha = step / steps
+            interim_df = start_pos.copy()
+            
+            interim_df['x'] = start_pos['x'] + (target_pos['x'] - start_pos['x']) * alpha
+            interim_df['y'] = start_pos['y'] + (target_pos['y'] - start_pos['y']) * alpha
+
+            fig = px.scatter(interim_df, x="x", y="y", text="robot_id", 
+                             range_x=[0, width], range_y=[0, height])
+
+            # ... [Include your marker/font styling and add_layout_image here] ...
+
+            fig.update_layout(
+                width=1200, height=450, 
+                margin=dict(l=0, r=0, t=0, b=0),
+                xaxis_visible=False, yaxis_visible=False,
+                transition_duration=30
+            )
+
+            # 3. Use the correct variable name defined above
+            chart_placeholder.plotly_chart(
                 fig, 
                 use_container_width=False, 
                 theme=None,
                 config={'displayModeBar': False},
-                key=f"warehouse_map_{frame_counter}" # Dynamic unique key
+                key=f"map_frame_{st.session_state.frame_count}" # Unique key fix
             )
 
-            time.sleep(0.03)
-
+            time.sleep(0.03) 
 
         st.session_state.current_pos = target_pos
 
