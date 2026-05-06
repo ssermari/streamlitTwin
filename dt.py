@@ -8,11 +8,13 @@ import time
 st.set_page_config(layout="wide")
 st.title("Warehouse Digital Twin - Smooth Tracking")
 
-# Force the app to use the full top space and remove padding
 st.markdown("""
     <style>
-        .block-container { padding-top: 1rem; padding-bottom: 0rem; }
-        .stPlotlyChart { margin-top: -30px; }
+        /* Adjust 2rem higher or lower to fix the title chopping */
+        .block-container { padding-top: 2rem; } 
+        
+        /* Ensures the chart doesn't have a huge gap above it */
+        iframe { margin-top: 0px !important; }
     </style>
 """, unsafe_allow_html=True)
 
