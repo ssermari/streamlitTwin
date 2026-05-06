@@ -8,6 +8,15 @@ import time
 st.set_page_config(layout="wide")
 st.title("Warehouse Digital Twin - Smooth Tracking")
 
+# Force the app to use the full top space and remove padding
+st.markdown("""
+    <style>
+        .block-container { padding-top: 1rem; padding-bottom: 0rem; }
+        .stPlotlyChart { margin-top: -30px; }
+    </style>
+""", unsafe_allow_html=True)
+
+
 # 1. Setup Image
 image_path = "wh.png" 
 img = Image.open(image_path)
@@ -79,26 +88,21 @@ def run_tracker():
                               xaxis_visible=False, yaxis_visible=False,
                               transition_duration=50) # Tell Plotly to animate markers
 
-            # Create a stable container with a fixed height and width
-
 
             # Create a stable container with a fixed height and width
+
             with placeholder.container():
-                # 1. Start the HTML "box" (Match width to your figure)
-                st.markdown(
-                    '<div style="height:450px; width:650px;">', 
-                    unsafe_allow_html=True
-                )
-                
-                # 2. Only call this ONCE
+                # Single call, no extra HTML wrappers needed here
                 st.plotly_chart(
                     fig, 
                     use_container_width=False, 
+                    # Set theme to None to prevent Streamlit from adding extra padding
+                    theme=None,
                     config={'displayModeBar': False}
                 )
                 
                 # 3. Close the HTML "box"
-                st.markdown('</div>', unsafe_allow_html=True)
+                $st.markdown('</div>', unsafe_allow_html=True)
 
             time.sleep(0.05) # Control the "frame rate"
 
