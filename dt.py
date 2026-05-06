@@ -51,7 +51,7 @@ def scale_coords(unit_x, unit_y):
 # 4. Initialize Session State
 if 'current_pos' not in st.session_state:
     st.session_state.current_pos = pd.DataFrame({
-        'robot_id': [f'carrier-{i}' for i in range(1, 11)],
+        'robot_id': [f'carrier-{i}' for i in range(1, 21)],
         'x': [img_width/2] * 10,
         'y': [img_height/2] * 10
     })
@@ -62,9 +62,10 @@ def get_new_target():
     try:
         response = sqs.receive_message(QueueUrl=QUEUE_URL, MaxNumberOfMessages=1, WaitTimeSeconds=1)
         if 'Messages' in response:
+            st.toast("New telematics data received from SQS!", icon="✅")
             msg = response['Messages'][0]
             body = json.loads(msg['Body'])
-            sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=msg['ReceiptHandle'])
+            #sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=msg['ReceiptHandle'])
 
             carrier_data = []
             for c in body.get('carriers', []):
@@ -75,7 +76,6 @@ def get_new_target():
         pass
     return st.session_state.current_pos
 
-# 5. Smoothing Fragment
 # 5. Smoothing Fragment
 @st.fragment
 def run_tracker():
