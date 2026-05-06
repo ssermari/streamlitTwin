@@ -1,60 +1,71 @@
-
 import streamlit as st
 import plotly.express as px
 from PIL import Image
 import pandas as pd
-import random
+import numpy as np
+import time
 
 st.set_page_config(layout="wide")
-st.title("Warehouse Digital Twin - Live Robot Tracking")
+st.title("Warehouse Digital Twin - Smooth Tracking")
 
-# 1. Load your floor plan image
-# Replace 'warehouse_floor.png' with your actual file path
+# 1. Setup Image
 image_path = "wh.png" 
 img = Image.open(image_path)
 width, height = img.size
 
-# 2. Mock Telematics Data (Replace this with your MQTT/SQL stream)
-def get_telematics():
-    return pd.DataFrame({
+# 2. Initialize Session State for Positions
+if 'current_pos' not in st.session_state:
+    st.session_state.current_pos = pd.DataFrame({
         'robot_id': ['Carrier_01', 'Carrier_02', 'Carrier_03'],
-        'x': [random.randint(0, width) for _ in range(3)],
-        'y': [random.randint(0, height) for _ in range(3)]
+        'x': [width/2] * 3,
+        'y': [height/2] * 3
     })
 
-# 3. Create the Visualization
-placeholder = st.empty()
+def get_new_target():
+    # Simulate receiving new telematics data
+    return pd.DataFrame({
+        'robot_id': ['Carrier_01', 'Carrier_02', 'Carrier_03'],
+        'x': [np.random.randint(0, width) for _ in range(3)],
+        'y': [np.random.randint(0, height) for _ in range(3)]
+    })
 
-# Simple loop to simulate real-time updates
-for i in range(100):
-    df = get_telematics()
+# 3. Smoothing Fragment
+@st.fragment
+def run_tracker():
+    placeholder = st.empty()
+    steps = 10  # Number of intermediate frames between telematics updates
     
-    # Create a Plotly figure
-    fig = px.scatter(df, x="x", y="y", text="robot_id", 
-                     range_x=[0, width], range_y=[0, height])
+    while True:
+        target_pos = get_new_target()
+        start_pos = st.session_state.current_pos.copy()
 
-    # Add the image as a background
-    fig.add_layout_image(
-        dict(
-            source=img,
-            xref="x", yref="y",
-            x=0, y=height, # Image starts at top-left
-            sizex=width, sizey=height,
-            sizing="stretch",
-            opacity=0.8,
-            layer="below")
-    )
+        # Animate the transition between start and target
+        for step in range(1, steps + 1):
+            alpha = step / steps  # Progress percentage (0.0 to 1.0)
+            
+            # Linear Interpolation formula: Start + (Target - Start) * Alpha
+            interim_df = start_pos.copy()
+            interim_df['x'] = start_pos['x'] + (target_pos['x'] - start_pos['x']) * alpha
+            interim_df['y'] = start_pos['y'] + (target_pos['y'] - start_pos['y']) * alpha
 
-    # Clean up the UI
-    fig.update_layout(
-        width=800, height=600,
-        margin=dict(l=0, r=0, t=0, b=0),
-        xaxis_visible=False, yaxis_visible=False
-    )
-    fig.update_traces(marker=dict(size=12, color='red', line=dict(width=2, color='White')))
+            fig = px.scatter(interim_df, x="x", y="y", text="robot_id", 
+                             range_x=[0, width], range_y=[0, height])
+            
+            fig.add_layout_image(dict(
+                source=img, xref="x", yref="y", x=0, y=height,
+                sizex=width, sizey=height, sizing="stretch", opacity=0.8, layer="below"
+            ))
 
-    with placeholder.container():
-        st.plotly_chart(fig, use_container_width=True)
-    
-    st.cache_data.clear() # Clear cache if pulling from a live DB
+            fig.update_layout(width=900, height=600, margin=dict(l=0, r=0, t=0, b=0),
+                              xaxis_visible=False, yaxis_visible=False,
+                              transition_duration=50) # Tell Plotly to animate markers
+
+            with placeholder.container():
+                st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+            
+            time.sleep(0.05) # Control the "frame rate"
+
+        st.session_state.current_pos = target_pos
+
+run_tracker()
 
