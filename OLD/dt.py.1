@@ -80,17 +80,8 @@ def run_tracker():
                               xaxis_visible=False, yaxis_visible=False,
                               transition_duration=50) # Tell Plotly to animate markers
 
-            # Create a stable container with a fixed height and width
             with placeholder.container():
-                # Use HTML to lock the dimensions of the plotting area
-                st.markdown(
-                    '<div style="height:600px; width:900px;">', 
-                    unsafe_allow_html=True
-                )
-                st.plotly_chart(fig, use_container_width=False)
-                st.markdown('</div>', unsafe_allow_html=True)
-
-                st.plotly_chart(fig, use_container_width=False, config={'displayModeBar': False})
+                st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
             
             time.sleep(0.05) # Control the "frame rate"
 
