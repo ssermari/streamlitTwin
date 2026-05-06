@@ -75,7 +75,7 @@ def run_tracker():
                 sizex=width, sizey=height, sizing="stretch", opacity=0.8, layer="below"
             ))
 
-            fig.update_layout(width=600, height=400, margin=dict(l=0, r=0, t=0, b=0),
+            fig.update_layout(width=800, height=300, margin=dict(l=0, r=0, t=0, b=0),
                               xaxis_visible=False, yaxis_visible=False,
                               transition_duration=50) # Tell Plotly to animate markers
 
