@@ -51,7 +51,7 @@ def scale_coords(unit_x, unit_y):
 # 4. Initialize Session State
 if 'current_pos' not in st.session_state:
     st.session_state.current_pos = pd.DataFrame({
-        'robot_id': [f'carrier-{i}' for i in range(1, 21)],
+        'robot_id': [f'carrier-{i}' for i in range(1, 11)],
         'x': [img_width/2] * 10,
         'y': [img_height/2] * 10
     })
