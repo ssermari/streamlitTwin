@@ -4,9 +4,11 @@ from PIL import Image
 import pandas as pd
 import numpy as np
 import time
+import boto3
+import json
 
 st.set_page_config(layout="wide")
-st.title("Warehouse Digital Twin - Smooth Tracking")
+st.title("USP Digital Twin")
 
 st.markdown("""
     <style>
@@ -18,11 +20,28 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/886812109001/wms-queue.fifo'
 
 # 1. Setup Image
 image_path = "wh.png" 
 img = Image.open(image_path)
 width, height = img.size
+
+# Constants for your specific warehouse
+WH_WIDTH_CELLS = 100*4  # Physical width of the floor
+WH_HEIGHT_CELLS = 32*4 # Physical height of the floor
+
+# Scale factors: pixels per meter
+scale_x = width / WH_WIDTH_CELLS
+scale_y = height / WH_HEIGHT_CELLS
+
+def scale_coords(meter_x, meter_y):
+    # Convert meters to pixels
+    pixel_x = meter_x * scale_x
+    # Flip Y if your robot origin is bottom-left but image is top-left
+    #pixel_y = height - (meter_y * scale_y) 
+    return pixel_x, pixel_y
+
 
 # 2. Initialize Session State for Positions
 if 'current_pos' not in st.session_state:
@@ -32,13 +51,40 @@ if 'current_pos' not in st.session_state:
         'y': [height/2] * 3
     })
 
+
+def aws_conn():
+    client = boto3.client(
+        "sqs",
+        aws_access_key_id=acc_key,
+        aws_secret_access_key=sec_key,
+        region_name="us-east-1"
+    )
+    return client
+
+
 def get_new_target():
-    # Simulate receiving new telematics data
-    return pd.DataFrame({
-        'robot_id': ['Carrier_01', 'Carrier_02', 'Carrier_03'],
-        'x': [np.random.randint(0, width) for _ in range(3)],
-        'y': [np.random.randint(0, height) for _ in range(3)]
-    })
+    sqs = boto3.client("sqs", region_name="us-east-1")
+    try:
+        response = sqs.receive_message(QueueUrl=QUEUE_URL, MaxNumberOfMessages=1)
+        if 'Messages' in response:
+            msg = response['Messages'][0]
+            body = json.loads(msg['Body'])
+            sqs.delete_message(QueueUrl=QUEUE_URL, ReceiptHandle=msg['ReceiptHandle'])
+
+            carrier_data = []
+            for c in body.get('carriers', []):
+                # Apply scaling here
+                px, py = scale_coords(c['position']['x'], c['position']['y'])
+                carrier_data.append({
+                    'robot_id': c['carrier_id'],
+                    'x': px,
+                    'y': py
+                })
+            return pd.DataFrame(carrier_data)
+    except Exception as e:
+        st.error(f"SQS Error: {e}")
+    return st.session_state.current_pos
+
 
 # 3. Smoothing Fragment
 @st.fragment
@@ -86,7 +132,7 @@ def run_tracker():
                 sizex=width, sizey=height, sizing="stretch", opacity=0.8, layer="below"
             ))
 
-            fig.update_layout(width=800, height=300, margin=dict(l=0, r=0, t=0, b=0),
+            fig.update_layout(width=1200, height=450, margin=dict(l=0, r=0, t=0, b=0),
                               xaxis_visible=False, yaxis_visible=False,
                               transition_duration=50) # Tell Plotly to animate markers
 
