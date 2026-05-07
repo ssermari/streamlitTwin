@@ -15,7 +15,6 @@ st.title("USP Digital Twin")
 st.markdown("""
 <style>
     .block-container { padding-top: 2rem; }
-    iframe { margin-top: 0px !important; }
     .hwm-box {
         background: #1a1a2e;
         border-left: 4px solid #00d4ff;
@@ -28,13 +27,6 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
-
-# ── Sidebar Controls ───────────────────────────────────────────────────────────
-with st.sidebar:
-    st.header("Simulation Settings")
-    batch_limit = st.slider("Max Events to Process", 1, 100, 25)
-    speed_level = st.slider("Movement Speed", 1, 5, 3)
-    frame_delay = 0.1 / speed_level  # 1=slow(0.1s), 5=fast(0.02s)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 STEPS           = 20
@@ -63,7 +55,7 @@ def get_warehouse_image():
     b64 = base64.b64encode(buf.getvalue()).decode()
     return img, f"data:image/png;base64,{b64}"
 
-img, img_b64        = get_warehouse_image()
+img, img_b64          = get_warehouse_image()
 img_width, img_height = img.size
 
 scale_x = img_width  / WH_WIDTH_UNITS
@@ -135,13 +127,20 @@ def render_frame(placeholder, df, label=""):
     )
     fig.add_layout_image(dict(
         source=img_b64, xref="x", yref="y",
-        x=0, y=img_height, sizex=img_width, sizey=img_height,
+        x=0, y=img_height,
+        sizex=img_width, sizey=img_height,
         sizing="stretch", opacity=0.8, layer="below",
     ))
     fig.update_layout(
-        width=1200, height=450,
+        # Match the figure size exactly to the image aspect ratio
+        width=img_width,
+        height=img_height,
         margin=dict(l=0, r=0, t=30 if label else 0, b=0),
         xaxis_visible=False, yaxis_visible=False,
+        xaxis=dict(range=[0, img_width],  scaleanchor=None, constrain="domain"),
+        yaxis=dict(range=[0, img_height], constrain="domain"),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
         title=dict(
             text=label, x=0.01,
             font=dict(color="#00d4ff", size=13)
@@ -149,7 +148,7 @@ def render_frame(placeholder, df, label=""):
     )
     placeholder.plotly_chart(
         fig,
-        use_container_width=False,
+        use_container_width=True,   # stretch to fill column width cleanly
         theme=None,
         config={"displayModeBar": False},
         key=f"warehouse_map_{st.session_state.frame_id}",
@@ -170,20 +169,36 @@ if hwm_doc:
 else:
     st.warning("No documents found in collection.")
 
-# ── Controls ───────────────────────────────────────────────────────────────────
-# FIX: original had st.columns([1, 1, 4]) returning 3 cols but only 2 were unpacked
-c1, c2 = st.columns([1, 1])
+# ── Top Controls ───────────────────────────────────────────────────────────────
+ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([3, 3, 1, 1])
 
-with c1:
-    play_btn = st.button("▶ Play", type="primary")
-with c2:
-    stop_btn = st.button("⏹ Stop")
+with ctrl1:
+    batch_limit = st.slider(
+        "Events to replay",
+        min_value=1, max_value=100, value=25, step=1,
+    )
+
+with ctrl2:
+    speed_level = st.select_slider(
+        "Playback speed",
+        options=["Slow", "Normal", "Fast", "Turbo"],
+        value="Normal",
+    )
+    frame_delay = {"Slow": 0.08, "Normal": 0.04, "Fast": 0.02, "Turbo": 0.005}[speed_level]
+
+with ctrl3:
+    st.write("")
+    play_btn = st.button("▶ Play", type="primary", use_container_width=True)
+
+with ctrl4:
+    st.write("")
+    stop_btn = st.button("⏹ Stop", use_container_width=True)
 
 # ── Placeholders ───────────────────────────────────────────────────────────────
 chart_placeholder  = st.empty()
 status_placeholder = st.empty()
 
-# Always render current position on load
+# Always render current position on load / rerun
 render_frame(chart_placeholder, st.session_state.current_pos)
 
 # ── Button State ───────────────────────────────────────────────────────────────
@@ -196,8 +211,6 @@ if stop_btn:
 if st.session_state.playing:
 
     status_placeholder.info("Loading MongoDB events...")
-
-    # FIX: original referenced undefined `n_events` — now correctly uses `batch_limit` from sidebar
     events = fetch_events(batch_limit)
 
     if not events:
@@ -207,7 +220,7 @@ if st.session_state.playing:
     else:
         status_placeholder.info(f"Playing back {len(events)} event(s)…")
 
-        # Reset carriers to center for a clean playback every time
+        # Reset carriers to center for a clean start
         st.session_state.current_pos = create_center_positions()
 
         for i, doc in enumerate(events):
@@ -218,11 +231,11 @@ if st.session_state.playing:
 
             incoming_df = doc_to_df(doc)
 
-            # Index on robot_id so LERP aligns correctly across frames
+            # Index on robot_id so LERP aligns correctly
             start_df  = st.session_state.current_pos.set_index("robot_id").sort_index()
             target_df = incoming_df.set_index("robot_id").sort_index()
 
-            # Carry forward robots missing from this event
+            # Carry forward any robots missing from this event
             for rid in start_df.index:
                 if rid not in target_df.index:
                     target_df.loc[rid] = start_df.loc[rid]
@@ -233,7 +246,7 @@ if st.session_state.playing:
                 f"  ·  {epoch_to_str(doc.get('timestamp_epoch', 0))}"
             )
 
-            # LERP animation — frame_delay driven by sidebar speed slider
+            # LERP animation
             for step in range(1, STEPS + 1):
                 alpha    = step / STEPS
                 frame_df = pd.DataFrame({
@@ -242,10 +255,9 @@ if st.session_state.playing:
                     "y": (start_df["y"] + (target_df["y"] - start_df["y"]) * alpha).values,
                 })
                 render_frame(chart_placeholder, frame_df, label=ts_label)
-                # FIX: original hardcoded STEP_SLEEP constant — now uses sidebar speed
                 time.sleep(frame_delay)
 
-            # Advance current position so next event starts from here
+            # Advance current position for next event
             st.session_state.current_pos = target_df.reset_index()
 
         if st.session_state.playing:
