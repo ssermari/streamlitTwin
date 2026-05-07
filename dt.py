@@ -18,14 +18,12 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# 2. Setup Authenticated AWS Client (Cached)
-@st.cache_resource
+# --- 2. Setup Authenticated AWS Client (Cached) ---
 
-
-# Fix 1: Correct queue URL
+# Define the URL here (above the decorator)
 QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/886812109001/wms-queue.fifo'
 
-
+@st.cache_resource
 def get_sqs_client():
     return boto3.client(
         "sqs",
@@ -33,6 +31,9 @@ def get_sqs_client():
         aws_secret_access_key=st.secrets["AWS_SECRET_ACCESS_KEY"],
         region_name=st.secrets.get("AWS_DEFAULT_REGION", "us-east-1")
     )
+
+sqs = get_sqs_client()
+
 
 # 3. Setup Image & Scaling
 image_path = "wh.png" 
