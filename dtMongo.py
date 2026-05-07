@@ -320,6 +320,16 @@ if st.session_state.playing:
 
     events = fetch_events(int(n_events))
 
+
+    # debug
+    for i, doc in enumerate(events):
+        st.write(f"Event {i+1} keys: {list(doc.keys())}")
+        st.write(f"Carriers sample: {doc.get('carriers', 'KEY MISSING')[:1]}")
+        target_df = doc_to_df(doc)
+        st.write(f"target_df: {target_df}")
+
+
+
     if not events:
 
         status_placeholder.warning(
