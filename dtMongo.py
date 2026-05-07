@@ -161,7 +161,7 @@ def doc_to_df(doc):
     return st.session_state.current_pos.copy()
 
 # ── Rendering ──────────────────────────────────────────────────────────────────
-def render_frame(placeholder, df, label=""):
+def render_frame(placeholder, df, label="", frame_id=0):
 
     fig = px.scatter(
         df,
@@ -231,7 +231,8 @@ def render_frame(placeholder, df, label=""):
         theme=None,
         config={
             "displayModeBar": False
-        }
+        },
+        key=f"warehouse_map_{frame_id}"
     )
 
 # ── High Water Mark ────────────────────────────────────────────────────────────
@@ -297,7 +298,8 @@ status_placeholder = st.empty()
 # ── Initial Render ─────────────────────────────────────────────────────────────
 render_frame(
     chart_placeholder,
-    st.session_state.current_pos
+    st.session_state.current_pos,
+    frame_id="initial"
 )
 
 # ── Control Logic ──────────────────────────────────────────────────────────────
@@ -390,12 +392,14 @@ if st.session_state.playing:
                     "x": interp_x.values,
                     "y": interp_y.values
                 })
-
+                
                 render_frame(
                     chart_placeholder,
                     frame_df,
-                    ts_label
-                )
+                    ts_label,
+                    frame_id=f"{i}_{step}"
+                )   
+
 
                 time.sleep(STEP_SLEEP)
 
