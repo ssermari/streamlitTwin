@@ -65,7 +65,7 @@ def get_new_target():
     try:
         response = sqs.receive_message(
             QueueUrl=QUEUE_URL, 
-            MaxNumberOfMessages=1, 
+            MaxNumberOfMessages=20, 
             WaitTimeSeconds=1
         )
         
