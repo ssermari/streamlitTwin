@@ -375,5 +375,4 @@ if st.session_state.playing:
         status_placeholder.success(
             f"✅ Playback Complete ({len(events)} events)"
         )
-```
 
