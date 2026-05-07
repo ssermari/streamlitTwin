@@ -154,8 +154,14 @@ status_placeholder = st.empty()
 render_frame(chart_placeholder, st.session_state.current_pos)
 
 if run_playback:
-    STEPS = 15          # LERP interpolation steps between frames
-    STEP_SLEEP = 0.03   # seconds per interpolation step
+    st.session_state.run_id += 1
+
+    # Reset to center only for the very first event's starting point
+    st.session_state.current_pos = pd.DataFrame({
+        "robot_id": [f"carrier-{i}" for i in range(1, 11)],
+        "x": [img_width  / 2] * 10,
+        "y": [img_height / 2] * 10,
+    })
 
     with st.spinner(f"Loading {n_events} events from MongoDB…"):
         events = fetch_events(n_events)
@@ -166,11 +172,13 @@ if run_playback:
         status_placeholder.info(f"Playing back {len(events)} event(s)…")
 
         for i, doc in enumerate(events):
-            target_df  = doc_to_df(doc)
-            start_df   = st.session_state.current_pos.copy()
-            ts_label   = f"Event {i+1}/{len(events)}  ·  {epoch_to_str(doc.get('timestamp_epoch', 0))}"
+            target_df = doc_to_df(doc)
 
-            # Smooth LERP from current → target
+            # ✅ Always grab start from the CURRENT position (updated each iteration)
+            start_df  = st.session_state.current_pos.copy()
+
+            ts_label  = f"Event {i+1}/{len(events)}  ·  {epoch_to_str(doc.get('timestamp_epoch', 0))}"
+
             for step in range(1, STEPS + 1):
                 alpha    = step / STEPS
                 frame_df = start_df.copy()
@@ -179,6 +187,7 @@ if run_playback:
                 render_frame(chart_placeholder, frame_df, label=ts_label)
                 time.sleep(STEP_SLEEP)
 
+            # ✅ Update current_pos AFTER each event so next iteration starts from here
             st.session_state.current_pos = target_df
 
         status_placeholder.success(
