@@ -209,7 +209,19 @@ if run_playback:
             target_df = doc_to_df(doc)
 
             # Capture start INSIDE the loop so each move chains from the previous
-            start_df  = st.session_state.current_pos.copy()
+
+
+
+            # Align robots by robot_id before interpolation
+            start_df = st.session_state.current_pos.set_index("robot_id")
+            target_df = target_df.set_index("robot_id")
+
+            # Ensure both contain same carriers
+            target_df = target_df.reindex(start_df.index).fillna(start_df)
+
+            start_df = start_df.sort_index()
+            target_df = target_df.sort_index()
+
 
             ts_label  = (
                 f"Event {i + 1} / {len(events)}"
@@ -217,16 +229,25 @@ if run_playback:
             )
 
             # Smooth LERP from current position → target position
+
             for step in range(1, STEPS + 1):
-                alpha    = step / STEPS
-                frame_df = start_df.copy()
-                frame_df["x"] = start_df["x"] + (target_df["x"] - start_df["x"]) * alpha
-                frame_df["y"] = start_df["y"] + (target_df["y"] - start_df["y"]) * alpha
+                alpha = step / STEPS
+                interp_x = start_df["x"] + (target_df["x"] - start_df["x"]) * alpha
+                interp_y = start_df["y"] + (target_df["y"] - start_df["y"]) * alpha
+
+                frame_df = pd.DataFrame({
+                    "robot_id": start_df.index,
+                    "x": interp_x.values,
+                    "y": interp_y.values,
+                })
                 render_frame(chart_placeholder, frame_df, label=ts_label)
                 time.sleep(STEP_SLEEP)
 
             # Advance current position to target before next event
-            st.session_state.current_pos = target_df
+
+            st.session_state.current_pos = (
+                target_df.reset_index()
+            ) 
 
         status_placeholder.success(
             f"✅ Playback complete — {len(events)} events replayed.  "
