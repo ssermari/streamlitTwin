@@ -194,13 +194,14 @@ def render_frame(placeholder, df, label=""):
         title=label
     )
 
+
     placeholder.plotly_chart(
         fig,
         use_container_width=False,
         theme=None,
-        config={"displayModeBar": False},
-        key="warehouse_map"
+        config={"displayModeBar": False}
     )
+
 
 # ── High Water Mark ────────────────────────────────────────────────────────────
 hwm_doc = col.find_one(
