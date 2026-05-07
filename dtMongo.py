@@ -133,8 +133,8 @@ def render_frame(placeholder, df, label=""):
     ))
     fig.update_layout(
         # Match the figure size exactly to the image aspect ratio
-        width=1200,
-        height=450,
+        width=900,
+        height=350,
         margin=dict(l=0, r=0, t=30 if label else 0, b=0),
         xaxis_visible=False, yaxis_visible=False,
         xaxis=dict(range=[0, img_width],  scaleanchor=None, constrain="domain"),
