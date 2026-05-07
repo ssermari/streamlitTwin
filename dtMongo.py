@@ -55,6 +55,7 @@ def scale_coords(unit_x, unit_y):
     return unit_x * scale_x, unit_y * scale_y
 
 # ── 3. Session state defaults ──────────────────────────────────────────────────
+
 if "current_pos" not in st.session_state:
     st.session_state.current_pos = pd.DataFrame({
         "robot_id": [f"carrier-{i}" for i in range(1, 11)],
@@ -63,6 +64,10 @@ if "current_pos" not in st.session_state:
     })
 if "frame_count" not in st.session_state:
     st.session_state.frame_count = 0
+if "run_id" not in st.session_state:   # ← add this
+    st.session_state.run_id = 0
+
+
 
 # ── 4. Helpers ─────────────────────────────────────────────────────────────────
 def epoch_to_str(epoch_ms: int) -> str:
