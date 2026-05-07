@@ -29,7 +29,8 @@ def get_sqs_client():
     )
 
 sqs = get_sqs_client()
-QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/886812109001/wms-queue.fifo'
+#QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/886812109001/wms-queue.fifo'
+QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/886812109001/wms-events-q'
 
 # 3. Setup Image & Scaling
 image_path = "wh.png" 
