@@ -133,8 +133,8 @@ def render_frame(placeholder, df, label=""):
     ))
     fig.update_layout(
         # Match the figure size exactly to the image aspect ratio
-        width=img_width,
-        height=img_height,
+        width=1200,
+        height=450,
         margin=dict(l=0, r=0, t=30 if label else 0, b=0),
         xaxis_visible=False, yaxis_visible=False,
         xaxis=dict(range=[0, img_width],  scaleanchor=None, constrain="domain"),
@@ -148,7 +148,7 @@ def render_frame(placeholder, df, label=""):
     )
     placeholder.plotly_chart(
         fig,
-        use_container_width=True,   # stretch to fill column width cleanly
+        use_container_width=False,   # stretch to fill column width cleanly
         theme=None,
         config={"displayModeBar": False},
         key=f"warehouse_map_{st.session_state.frame_id}",
