@@ -4,7 +4,8 @@ from botocore.exceptions import NoCredentialsError
 
 # --- Configuration ---
 # Replace with your actual queue URL
-QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/886812109001/wms-queue.fifo'
+#QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/886812109001/wms-queue.fifo'
+QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/886812109001/wms-events-q'
 REGION = 'us-east-1'
 
 st.title("AWS SQS Message Reader")
