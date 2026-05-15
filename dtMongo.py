@@ -121,7 +121,7 @@ def render_frame(placeholder, df, label=""):
         range_x=[0, img_width], range_y=[0, img_height]
     )
     fig.update_traces(
-        marker=dict(size=18, color="red", line=dict(width=2, color="white")),
+        marker=dict(size=18, color="red", symbol="square", line=dict(width=5, color="white")),
         textposition="top center",
         textfont=dict(family="Arial Black", size=14, color="darkblue"),
     )
