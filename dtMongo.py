@@ -259,7 +259,7 @@ if st.session_state.playing:
             )
             log_placeholder.markdown(
                 "**Event Log**\n\n"
-                + "\n\n".join(f"- {line}" for line in reversed(log_lines))
+                + "\n\n".join(f"- {line}" for line in log_lines)
                 # reversed → newest entry at the top
             )
 
