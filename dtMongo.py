@@ -90,7 +90,7 @@ def epoch_to_str(epoch_ms):
 def fetch_events(n):
     return list(
         col.find({}, {"_id": 0})
-           .sort("timestamp_epoch", pymongo.ASCENDING)
+           .sort("timestamp_epoch", pymongo.DESCENDING)
            .limit(n)
     )
 
@@ -184,7 +184,7 @@ with ctrl2:
         options=["Slow", "Normal", "Fast", "Turbo"],
         value="Normal",
     )
-    frame_delay = {"Slow": 0.08, "Normal": 0.04, "Fast": 0.02, "Turbo": 0.005}[speed_level]
+    frame_delay = {"Slow": 0.1, "Normal": 0.07, "Fast": 0.02, "Turbo": 0.005}[speed_level]
 
 with ctrl3:
     st.write("")
@@ -222,8 +222,11 @@ if st.session_state.playing:
 
         # Reset carriers to center for a clean start
         st.session_state.current_pos = create_center_positions()
+        
+        # Re-order the list oldest to newest
+        sorted_events = sorted(events, key=lambda x: x['timestamp_epoch'])
 
-        for i, doc in enumerate(events):
+        for i, doc in enumerate(sorted_events):
 
             if not st.session_state.playing:
                 status_placeholder.warning("⏹ Playback stopped.")
