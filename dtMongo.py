@@ -78,6 +78,8 @@ if "playing" not in st.session_state:
     st.session_state.playing = False
 if "frame_id" not in st.session_state:
     st.session_state.frame_id = 0
+if "log_lines" not in st.session_state:
+    st.session_state.log_lines = []    
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def epoch_to_str(epoch_ms):
@@ -209,6 +211,15 @@ if stop_btn:
     st.session_state.playing = False
 
 # ── Playback Loop ──────────────────────────────────────────────────────────────
+
+# ── re-render log on every rerun so it survives Stop ─────────────────────────
+if st.session_state.log_lines:
+    log_placeholder.markdown(
+        "**Event Log**\n\n"
+        + "\n\n".join(f"- {line}" for line in st.session_state.log_lines)
+    )
+
+# ── playback ──────────────────────────────────────────────────────────────────
 if st.session_state.playing:
     status_placeholder.info("Loading MongoDB events...")
     events = fetch_events(batch_limit)
@@ -217,10 +228,13 @@ if st.session_state.playing:
         st.session_state.playing = False
     else:
         status_placeholder.info(f"Playing back {len(events)} event(s)…")
+        # Reset carriers to center for a clean start
         st.session_state.current_pos = create_center_positions()
+        # Fresh log each time Play is hit
+        st.session_state.log_lines = []
 
+        # Re-order the list oldest to newest
         sorted_events = sorted(events, key=lambda x: x['timestamp_epoch'])
-        log_lines = []                   # ← accumulates log entries
 
         for i, doc in enumerate(sorted_events):
             if not st.session_state.playing:
@@ -228,9 +242,10 @@ if st.session_state.playing:
                 break
 
             incoming_df = doc_to_df(doc)
+            # Index on robot_id so LERP aligns correctly
             start_df  = st.session_state.current_pos.set_index("robot_id").sort_index()
             target_df = incoming_df.set_index("robot_id").sort_index()
-
+            # Carry forward any robots missing from this event
             for rid in start_df.index:
                 if rid not in target_df.index:
                     target_df.loc[rid] = start_df.loc[rid]
@@ -241,7 +256,7 @@ if st.session_state.playing:
                 f"  ·  {epoch_to_str(doc.get('timestamp_epoch', 0))}"
             )
 
-            # ── LERP animation ─────────────────────────────────────────────
+            # LERP animation
             for step in range(1, STEPS + 1):
                 alpha    = step / STEPS
                 frame_df = pd.DataFrame({
@@ -252,18 +267,18 @@ if st.session_state.playing:
                 render_frame(chart_placeholder, frame_df, label=ts_label)
                 time.sleep(frame_delay)
 
-            # ── append log entry after each event finishes ─────────────────
+            # Advance current position for next event
+            st.session_state.current_pos = target_df.reset_index()
+
+            # Append log entry after each event finishes
             robot_ids = ", ".join(str(r) for r in target_df.index.tolist())
-            log_lines.append(
+            st.session_state.log_lines.append(
                 f"**{ts_label}** — robots: `{robot_ids}`"
             )
             log_placeholder.markdown(
                 "**Event Log**\n\n"
-                + "\n\n".join(f"- {line}" for line in log_lines)
-                # reversed → newest entry at the top
+                + "\n\n".join(f"- {line}" for line in st.session_state.log_lines)
             )
-
-            st.session_state.current_pos = target_df.reset_index()
 
         if st.session_state.playing:
             st.session_state.playing = False
