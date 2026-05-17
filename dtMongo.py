@@ -130,7 +130,7 @@ def render_frame(placeholder, df, label=""):
     )
 
     # Draw a rectangle for each robot — w/h are in data coordinate units
-    w, h = 15, 15  # ← tune these to your coordinate space
+    w, h = 75, 75  # ← tune these to your coordinate space
     for _, row in df.iterrows():
         fig.add_shape(
             type="rect",
