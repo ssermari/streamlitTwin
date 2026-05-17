@@ -119,18 +119,16 @@ def doc_to_df(doc):
 def render_frame(placeholder, df, label=""):
     st.session_state.frame_id += 1
     fig = px.scatter(
-        df, x="x", y="y", text="robot_id",
+        df, x="x", y="y",
         range_x=[0, img_width], range_y=[0, img_height]
     )
-    # Make the scatter dots invisible — we just need them for the labels
+    # Invisible scatter — just anchors the plot axes
     fig.update_traces(
         marker=dict(size=0, color="rgba(0,0,0,0)"),
-        textposition="top center",
-        textfont=dict(family="Arial Black", size=14, color="darkblue"),
     )
 
-    # Draw a rectangle for each robot — w/h are in data coordinate units
-    w, h = 75, 75  # ← tune these to your coordinate space
+    # Draw a rectangle for each robot
+    w, h = 85, 85
     for _, row in df.iterrows():
         fig.add_shape(
             type="rect",
@@ -138,6 +136,14 @@ def render_frame(placeholder, df, label=""):
             y0=row["y"] - h / 2, y1=row["y"] + h / 2,
             fillcolor="red",
             line=dict(color="white", width=2),
+            xref="x", yref="y",
+        )
+        # Annotation renders above shapes
+        fig.add_annotation(
+            x=row["x"], y=row["y"],
+            text=str(row["robot_id"]),
+            showarrow=False,
+            font=dict(family="Arial Black", size=14, color="white"),
             xref="x", yref="y",
         )
 
@@ -168,7 +174,6 @@ def render_frame(placeholder, df, label=""):
         config={"displayModeBar": False},
         key=f"warehouse_map_{st.session_state.frame_id}",
     )
-
 
 # ── High Water Mark ────────────────────────────────────────────────────────────
 hwm_doc = col.find_one(
