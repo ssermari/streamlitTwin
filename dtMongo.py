@@ -128,7 +128,7 @@ def render_frame(placeholder, df, label=""):
     )
 
     # Draw a rectangle for each robot
-    w, h = 85, 85
+    w, h = 90, 90
     for _, row in df.iterrows():
         fig.add_shape(
             type="rect",
