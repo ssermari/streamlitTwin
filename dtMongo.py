@@ -143,7 +143,7 @@ def render_frame(placeholder, df, label=""):
             x=row["x"], y=row["y"],
             text=str(row["robot_id"]),
             showarrow=False,
-            font=dict(family="Arial Black", size=14, color="white"),
+            font=dict(family="Arial Black", size=14, color="blue"),
             xref="x", yref="y",
         )
 
