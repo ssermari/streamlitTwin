@@ -122,11 +122,25 @@ def render_frame(placeholder, df, label=""):
         df, x="x", y="y", text="robot_id",
         range_x=[0, img_width], range_y=[0, img_height]
     )
+    # Make the scatter dots invisible — we just need them for the labels
     fig.update_traces(
-        marker=dict(size=18, color="red", symbol="square", line=dict(width=10, color="white")),
+        marker=dict(size=0, color="rgba(0,0,0,0)"),
         textposition="top center",
         textfont=dict(family="Arial Black", size=14, color="darkblue"),
     )
+
+    # Draw a rectangle for each robot — w/h are in data coordinate units
+    w, h = 15, 15  # ← tune these to your coordinate space
+    for _, row in df.iterrows():
+        fig.add_shape(
+            type="rect",
+            x0=row["x"] - w / 2, x1=row["x"] + w / 2,
+            y0=row["y"] - h / 2, y1=row["y"] + h / 2,
+            fillcolor="red",
+            line=dict(color="white", width=2),
+            xref="x", yref="y",
+        )
+
     fig.add_layout_image(dict(
         source=img_b64, xref="x", yref="y",
         x=0, y=img_height,
@@ -134,12 +148,11 @@ def render_frame(placeholder, df, label=""):
         sizing="stretch", opacity=0.8, layer="below",
     ))
     fig.update_layout(
-        # Match the figure size exactly to the image aspect ratio
         width=900,
         height=350,
         margin=dict(l=0, r=0, t=30 if label else 0, b=0),
         xaxis_visible=False, yaxis_visible=False,
-        xaxis=dict(range=[0, img_width],  scaleanchor=None, constrain="domain"),
+        xaxis=dict(range=[0, img_width], scaleanchor=None, constrain="domain"),
         yaxis=dict(range=[0, img_height], constrain="domain"),
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
@@ -150,11 +163,12 @@ def render_frame(placeholder, df, label=""):
     )
     placeholder.plotly_chart(
         fig,
-        use_container_width=False,   # stretch to fill column width cleanly
+        use_container_width=False,
         theme=None,
         config={"displayModeBar": False},
         key=f"warehouse_map_{st.session_state.frame_id}",
     )
+
 
 # ── High Water Mark ────────────────────────────────────────────────────────────
 hwm_doc = col.find_one(
