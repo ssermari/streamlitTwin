@@ -31,7 +31,7 @@ st.markdown("""
 # ── Constants ──────────────────────────────────────────────────────────────────
 STEPS           = 8
 WH_WIDTH_UNITS  = 400
-WH_HEIGHT_UNITS = 128
+WH_HEIGHT_UNITS = 144
 
 # ── MongoDB Connection ─────────────────────────────────────────────────────────
 @st.cache_resource
