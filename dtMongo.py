@@ -220,7 +220,7 @@ with ctrl4:
 
 # ── Placeholders ───────────────────────────────────────────────────────────────
 chart_placeholder  = st.empty()
-st.caption("Grids are 2'x2' base units.  Carriers are 52"x52".  Logical map resolution is 8x8 per base unit.") 
+st.caption("Grids are 2'x2' base units.  Carriers are 52\"x52\".  Logical map resolution is 8x8 per base unit.") 
 status_placeholder = st.empty()
 log_placeholder    = st.empty()  
 
