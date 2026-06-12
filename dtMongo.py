@@ -29,7 +29,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-STEPS           = 20
+STEPS           = 8
 WH_WIDTH_UNITS  = 400
 WH_HEIGHT_UNITS = 128
 
@@ -207,7 +207,7 @@ with ctrl2:
         options=["Slow", "Normal", "Fast", "Turbo"],
         value="Normal",
     )
-    frame_delay = {"Slow": 0.1, "Normal": 0.07, "Fast": 0.02, "Turbo": 0.005}[speed_level]
+    frame_delay = {"Slow": 0.1, "Normal": 0.07, "Fast": 0.02, "Turbo": 0.0}[speed_level]
 
 with ctrl3:
     st.write("")
