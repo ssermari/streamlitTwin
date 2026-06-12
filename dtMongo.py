@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 
 # ── Page Config ────────────────────────────────────────────────────────────────
 #st.set_page_config(layout="wide")
-st.st.set_page_config(layout="wide", page_title="Radiant Digital Twin", page_icon="📦")
+st.set_page_config(layout="wide", page_title="Radiant Digital Twin", page_icon="📦")
 st.title("USP Digital Twin")
 
 st.markdown("""
