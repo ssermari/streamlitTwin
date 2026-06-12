@@ -65,13 +65,11 @@ def scale_coords(unit_x, unit_y):
     return unit_x * scale_x, unit_y * scale_y
 
 # ── Session State ──────────────────────────────────────────────────────────────
-def create_center_positions(robot_ids=None):
-    if robot_ids is None:
-        robot_ids = []
+def create_center_positions():
     return pd.DataFrame({
-        "robot_id": robot_ids,
-        "x": [img_width  / 2] * len(robot_ids),
-        "y": [img_height / 2] * len(robot_ids),
+        "robot_id": [f"carrier-{i}" for i in range(1, 11)],
+        "x": [img_width  / 2] * 10,
+        "y": [img_height / 2] * 10,
     })
 
 if "current_pos" not in st.session_state:
@@ -249,21 +247,13 @@ if st.session_state.playing:
         st.session_state.playing = False
     else:
         status_placeholder.info(f"Playing back {len(events)} event(s)…")
+        # Reset carriers to center for a clean start
+        st.session_state.current_pos = create_center_positions()
+        # Fresh log each time Play is hit
+        st.session_state.log_lines = []
 
         # Re-order the list oldest to newest
         sorted_events = sorted(events, key=lambda x: x['timestamp_epoch'])
-
-        # Discover all robot IDs present across this batch of events
-        all_robot_ids = sorted({
-            c["carrier_id"]
-            for doc in sorted_events
-            for c in doc.get("carriers", [])
-        })
-
-        # Reset carriers to center for a clean start
-        st.session_state.current_pos = create_center_positions(all_robot_ids)
-        # Fresh log each time Play is hit
-        st.session_state.log_lines = []
 
         for i, doc in enumerate(sorted_events):
             if not st.session_state.playing:
@@ -274,18 +264,11 @@ if st.session_state.playing:
             # Index on robot_id so LERP aligns correctly
             start_df  = st.session_state.current_pos.set_index("robot_id").sort_index()
             target_df = incoming_df.set_index("robot_id").sort_index()
-
-            # Union of robots known so far and robots in this event
-            full_index = start_df.index.union(target_df.index)
-            start_df  = start_df.reindex(full_index)
-            target_df = target_df.reindex(full_index)
-
-            # New robots: no prior position -> appear directly at target (no LERP)
-            start_df["x"] = start_df["x"].fillna(target_df["x"])
-            start_df["y"] = start_df["y"].fillna(target_df["y"])
-            # Robots missing from this event: hold their previous position
-            target_df["x"] = target_df["x"].fillna(start_df["x"])
-            target_df["y"] = target_df["y"].fillna(start_df["y"])
+            # Carry forward any robots missing from this event
+            for rid in start_df.index:
+                if rid not in target_df.index:
+                    target_df.loc[rid] = start_df.loc[rid]
+            target_df = target_df.sort_index()
 
             ts_label = (
                 f"Event {i+1}/{len(events)}"
