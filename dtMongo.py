@@ -208,7 +208,7 @@ with ctrl2:
         options=["Slow", "Normal", "Fast", "Turbo"],
         value="Normal",
     )
-    frame_delay = {"Slow": 0.1, "Normal": 0.07, "Fast": 0.02, "Turbo": 0.0}[speed_level]
+    frame_delay = {"Slow": 0.2, "Normal": 0.07, "Fast": 0.02, "Turbo": 0.0}[speed_level]
 
 with ctrl3:
     st.write("")
@@ -220,7 +220,7 @@ with ctrl4:
 
 # ── Placeholders ───────────────────────────────────────────────────────────────
 chart_placeholder  = st.empty()
-st.caption("Grids are 2'x2' base units.  Carriers are 52\"x52\".  Logical map resolution is 8x8 per base unit.") 
+st.caption("Grids are 2'x2' base units.  Carriers are 52inches x 52inches.  Logical map resolution is 8x8 per base unit.") 
 status_placeholder = st.empty()
 log_placeholder    = st.empty()  
 
