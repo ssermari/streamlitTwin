@@ -602,21 +602,46 @@ def main_editor():
     st.markdown(legend_chips_html(), unsafe_allow_html=True)
 
     st.subheader("Map")
-    mode_label = st.radio(
-        "Map mode",
-        ["Select cells", "Zoom / Pan"],
-        horizontal=True,
-        label_visibility="collapsed",
-        help=(
-            "Select cells: click a cell, or drag a box / lasso to select multiple cells. "
-            "Zoom / Pan: drag to zoom into an area, or scroll to zoom in/out. Use the "
-            "toolbar's 'Reset axes' button (or double-click the map) to zoom back out."
-        ),
-    )
+
+    # The chart's current selection is stored in session_state under its own
+    # widget key ("grid_chart") as soon as the user interacts with it, and
+    # that happens BEFORE Streamlit reruns the script — so it's already
+    # available here, ahead of rendering the chart itself. That lets us put
+    # the Apply/Undo buttons in the same row as the mode toggle, above the
+    # map, instead of a separate row that adds vertical space.
+    prior_event = st.session_state.get("grid_chart")
+    selected_cells = extract_selected_cells(prior_event, rows, cols)
+
+    mode_col, apply_col, undo_col = st.columns([2, 1.4, 1.1], gap="medium")
+    with mode_col:
+        mode_label = st.radio(
+            "Map mode",
+            ["Select cells", "Zoom / Pan"],
+            horizontal=True,
+            label_visibility="collapsed",
+            help=(
+                "Select cells: click a cell, or drag a box / lasso to select multiple cells. "
+                "Zoom / Pan: drag to zoom into an area, or scroll to zoom in/out. Use the "
+                "toolbar's 'Reset axes' button (or double-click the map) to zoom back out."
+            ),
+        )
+    with apply_col:
+        apply_clicked = st.button(
+            f"Apply '{apply_type}' to selection ({len(selected_cells)})",
+            disabled=not selected_cells,
+            type="primary",
+            width="stretch",
+        )
+    with undo_col:
+        undo_clicked = st.button(
+            "Undo last change",
+            disabled=not st.session_state.undo_stack,
+            width="stretch",
+        )
     dragmode = "select" if mode_label == "Select cells" else "zoom"
     st.caption(
         "**Select cells** mode: click a cell, or drag a box / lasso to select multiple "
-        "cells, then use **Apply to selection** below. **Zoom / Pan** mode: drag to zoom "
+        "cells, then use **Apply to selection** above. **Zoom / Pan** mode: drag to zoom "
         "into an area, scroll to zoom, or use the toolbar to pan / reset the view. You can "
         "also target an exact rectangle by coordinates further down."
     )
@@ -644,20 +669,10 @@ def main_editor():
         height=fig_h,
         config={"displaylogo": False, "scrollZoom": True, "displayModeBar": True},
     )
-
-    selected_cells = extract_selected_cells(event, rows, cols)
-
-    c1, c2, c3 = st.columns([2, 1, 1])
-    with c1:
-        st.caption(f"**{len(selected_cells)}** cell(s) currently selected on the map.")
-    with c2:
-        apply_clicked = st.button(
-            f"Apply '{apply_type}' to selection",
-            disabled=not selected_cells,
-            type="primary",
-        )
-    with c3:
-        undo_clicked = st.button("Undo last change", disabled=not st.session_state.undo_stack)
+    # Refresh selected_cells from this run's event too, so that if the user's
+    # click both changed the selection AND landed on this same rerun as an
+    # Apply/Undo click, downstream logic still sees the latest selection.
+    selected_cells = extract_selected_cells(event, rows, cols) or selected_cells
 
     if apply_clicked and selected_cells:
         push_undo()
