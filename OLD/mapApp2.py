@@ -8,7 +8,7 @@ MongoDB for storage of the source BaseMap(s) and versioned ZoneMap(s).
 Run with:
     streamlit run app.py
 
-Configuration (all optional, all overridable in the sidebar):
+Configuration (all optional, set via environment variables and not shown in the UI):
     MONGO_URI         - connection string (default: mongodb://localhost:27017)
     MONGO_DB          - database name (default: warehouse_mapping)
     MONGO_COLLECTION  - source collection, holding BaseMap docs (default: base_maps)
@@ -347,18 +347,13 @@ def init_state():
 
 def sidebar_connection() -> tuple[object, str, str, str, bool]:
     st.sidebar.header("1. MongoDB connection")
-    uri = st.sidebar.text_input(
-        "Connection URI", value=DEFAULT_URI, type="password",
-        help="Defaults from the MONGO_URI environment variable.",
+    st.sidebar.caption(
+        "Connection URI, database, and source collection are configured via "
+        "environment variables and are not shown here."
     )
-    db_name = st.sidebar.text_input(
-        "Database name", value=DEFAULT_DB,
-        help="Defaults from the MONGO_DB environment variable.",
-    )
-    source_coll = st.sidebar.text_input(
-        "Source collection (BaseMaps)", value=DEFAULT_SOURCE_COLL,
-        help="Defaults from the MONGO_COLLECTION environment variable.",
-    )
+    uri = DEFAULT_URI
+    db_name = DEFAULT_DB
+    source_coll = DEFAULT_SOURCE_COLL
     target_coll = st.sidebar.text_input(
         "Target collection (ZoneMaps)", value=DEFAULT_TARGET_COLL,
         help="Where new ZoneMap versions are saved. Defaults to 'target_logical_maps'; "
@@ -376,7 +371,7 @@ def sidebar_connection() -> tuple[object, str, str, str, bool]:
     if MONGOMOCK_AVAILABLE:
         st.session_state.use_mock = col_b.toggle(
             "Demo mode", value=st.session_state.use_mock,
-            help="Use an in-memory database instead of the URI above. Nothing is persisted.",
+            help="Use an in-memory database instead of the configured connection. Nothing is persisted.",
         )
     else:
         st.session_state.use_mock = False
