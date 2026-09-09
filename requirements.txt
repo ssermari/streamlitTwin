@@ -1,3 +1,4 @@
 plotly
 boto3
 pymongo
+pandas
