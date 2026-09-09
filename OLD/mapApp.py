@@ -9,12 +9,8 @@ Run with:
     streamlit run app.py
 
 Configuration (all optional, all overridable in the sidebar):
-    MONGO_URI         - connection string (default: mongodb://localhost:27017)
-    MONGO_DB          - database name (default: warehouse_mapping)
-    MONGO_COLLECTION  - source collection, holding BaseMap docs (default: base_maps)
-
-The target collection (where ZoneMap versions are saved) is always a plain
-sidebar text field the user can edit; it defaults to "target_logical_maps".
+    MONGODB_URI   - connection string (default: mongodb://localhost:27017)
+    MONGODB_DB    - database name    (default: warehouse_mapping)
 """
 
 from __future__ import annotations
@@ -75,10 +71,10 @@ SAMPLE_BASE_MAP = [
 ]
 SAMPLE_BASE_MAP_ID = "warehouse-01-base"
 
-DEFAULT_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
-DEFAULT_DB = os.environ.get("MONGO_DB", "warehouse_mapping")
-DEFAULT_SOURCE_COLL = os.environ.get("MONGO_COLLECTION", "base_maps")
-DEFAULT_TARGET_COLL = "target_logical_maps"
+DEFAULT_URI = os.environ.get("MONGODB_URI", "mongodb://localhost:27017")
+DEFAULT_DB = os.environ.get("MONGODB_DB", "warehouse_mapping")
+DEFAULT_SOURCE_COLL = "base_maps"
+DEFAULT_TARGET_COLL = "zone_maps"
 
 UNDO_LIMIT = 25
 
@@ -347,23 +343,10 @@ def init_state():
 
 def sidebar_connection() -> tuple[object, str, str, str, bool]:
     st.sidebar.header("1. MongoDB connection")
-    uri = st.sidebar.text_input(
-        "Connection URI", value=DEFAULT_URI, type="password",
-        help="Defaults from the MONGO_URI environment variable.",
-    )
-    db_name = st.sidebar.text_input(
-        "Database name", value=DEFAULT_DB,
-        help="Defaults from the MONGO_DB environment variable.",
-    )
-    source_coll = st.sidebar.text_input(
-        "Source collection (BaseMaps)", value=DEFAULT_SOURCE_COLL,
-        help="Defaults from the MONGO_COLLECTION environment variable.",
-    )
-    target_coll = st.sidebar.text_input(
-        "Target collection (ZoneMaps)", value=DEFAULT_TARGET_COLL,
-        help="Where new ZoneMap versions are saved. Defaults to 'target_logical_maps'; "
-             "type any collection name you'd like to use instead.",
-    )
+    uri = st.sidebar.text_input("Connection URI", value=DEFAULT_URI, type="password")
+    db_name = st.sidebar.text_input("Database name", value=DEFAULT_DB)
+    source_coll = st.sidebar.text_input("Source collection (BaseMaps)", value=DEFAULT_SOURCE_COLL)
+    target_coll = st.sidebar.text_input("Target collection (ZoneMaps)", value=DEFAULT_TARGET_COLL)
 
     col_a, col_b = st.sidebar.columns(2)
     if col_a.button("Test connection", width="stretch"):
