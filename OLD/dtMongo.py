@@ -30,17 +30,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-STEPS               = 8
-WH_WIDTH_UNITS      = 400
-WH_HEIGHT_UNITS     = 144
-
-# Logical grid: base unit is 2'x2', rendered at 8x8 resolution per base unit,
-# so each logical unit = (2 * 12) / 8 = 3 inches. Pallets are 52" square.
-BASE_UNIT_FT             = 2
-LOGICAL_RES_PER_BASE_UNIT = 8
-INCHES_PER_UNIT          = (BASE_UNIT_FT * 12) / LOGICAL_RES_PER_BASE_UNIT  # 3.0
-PALLET_SIZE_INCHES       = 52
-PALLET_SIZE_UNITS        = PALLET_SIZE_INCHES / INCHES_PER_UNIT  # ~17.33 units
+STEPS           = 8
+WH_WIDTH_UNITS  = 400
+WH_HEIGHT_UNITS = 144
 
 # ── MongoDB Connection ─────────────────────────────────────────────────────────
 @st.cache_resource
@@ -90,7 +82,7 @@ if "playing" not in st.session_state:
 if "frame_id" not in st.session_state:
     st.session_state.frame_id = 0
 if "log_lines" not in st.session_state:
-    st.session_state.log_lines = []
+    st.session_state.log_lines = []    
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def epoch_to_str(epoch_ms):
@@ -138,9 +130,8 @@ def render_frame(placeholder, df, label=""):
         marker=dict(size=0, color="rgba(0,0,0,0)"),
     )
 
-    # Draw a rectangle for each robot, sized to the real-world 52" pallet
-    # footprint via the same unit->pixel scale used for position.
-    w, h = PALLET_SIZE_UNITS * scale_x, PALLET_SIZE_UNITS * scale_y
+    # Draw a rectangle for each robot
+    w, h = 90, 90
     for _, row in df.iterrows():
         fig.add_shape(
             type="rect",
@@ -229,9 +220,9 @@ with ctrl4:
 
 # ── Placeholders ───────────────────────────────────────────────────────────────
 chart_placeholder  = st.empty()
-st.caption("Grids are 2'x2' base units.  Carriers are 52inches x 52inches.  Logical map resolution is 8x8 per base unit.")
+st.caption("Grids are 2'x2' base units.  Carriers are 52inches x 52inches.  Logical map resolution is 8x8 per base unit.") 
 status_placeholder = st.empty()
-log_placeholder    = st.empty()
+log_placeholder    = st.empty()  
 
 # Always render current position on load / rerun
 render_frame(chart_placeholder, st.session_state.current_pos)
