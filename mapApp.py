@@ -253,7 +253,12 @@ def save_zone_map(db, target_coll: str, document: dict) -> tuple[bool, str]:
 # Grid / chart helpers
 # --------------------------------------------------------------------------
 
-def make_figure(grid: list[list[str]], dragmode: str = "select"):
+def make_figure(
+    grid: list[list[str]],
+    dragmode: str = "select",
+    max_width_px: int = 1000,
+    max_height_px: int = 650,
+):
     rows = len(grid)
     cols = len(grid[0]) if rows else 0
 
@@ -296,10 +301,25 @@ def make_figure(grid: list[list[str]], dragmode: str = "select"):
     # becomes dead space once that lock shrinks the plotting domain to fit.
     MARGIN_L, MARGIN_R, MARGIN_T, MARGIN_B = 10, 10, 10, 10
     LEGEND_RESERVE_PX = 190
+    MIN_CELL_PX, MAX_CELL_PX = 4, 34
 
-    cell_px = max(12, min(34, int(600 / max(rows, cols, 1))))
-    fig_width = cell_px * cols + MARGIN_L + MARGIN_R + LEGEND_RESERVE_PX
-    fig_height = cell_px * rows + MARGIN_T + MARGIN_B
+    # Fit-to-bounding-box sizing: pick the largest square cell size that keeps
+    # BOTH the full width (including margins + legend) under max_width_px AND
+    # the full height under max_height_px. This is computed directly from the
+    # grid's own aspect ratio, so a wide-but-short grid (e.g. 100x32) ends up
+    # wide-but-short on screen too, instead of being forced into a fixed
+    # height that leaves dead space above/below once the 1:1 scale lock
+    # shrinks the plotting domain to match. Previously a hard 12px/cell floor
+    # made fig_width balloon past the real container width on wide grids,
+    # which is what caused that leftover vertical whitespace.
+    width_budget = max(max_width_px - MARGIN_L - MARGIN_R - LEGEND_RESERVE_PX, MIN_CELL_PX)
+    height_budget = max(max_height_px - MARGIN_T - MARGIN_B, MIN_CELL_PX)
+    cell_w = width_budget / max(cols, 1)
+    cell_h = height_budget / max(rows, 1)
+    cell_px = max(MIN_CELL_PX, min(MAX_CELL_PX, cell_w, cell_h))
+
+    fig_width = int(round(cell_px * cols + MARGIN_L + MARGIN_R + LEGEND_RESERVE_PX))
+    fig_height = int(round(cell_px * rows + MARGIN_T + MARGIN_B))
 
     fig.update_traces(marker=dict(size=cell_px * 0.92))
     fig.update_layout(
@@ -380,6 +400,7 @@ def init_state():
         "grid_meta": {},
         "undo_stack": [],
         "use_mock": False,
+        "map_width_px": 1000,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -599,7 +620,22 @@ def main_editor():
         "into an area, scroll to zoom, or use the toolbar to pan / reset the view. You can "
         "also target an exact rectangle by coordinates further down."
     )
-    fig, fig_w, fig_h = make_figure(grid, dragmode=dragmode)
+    st.session_state.map_width_px = st.slider(
+        "Max map display width (px)",
+        min_value=500,
+        max_value=1800,
+        value=st.session_state.map_width_px,
+        step=50,
+        help=(
+            "The map is sized to fit within this width while keeping cells square. "
+            "If you still see empty space to the side or the map looks compressed, "
+            "lower this to roughly match your browser window's width; raise it on a "
+            "wider monitor. This mainly matters for grids much wider than they are tall."
+        ),
+    )
+    fig, fig_w, fig_h = make_figure(
+        grid, dragmode=dragmode, max_width_px=st.session_state.map_width_px
+    )
     event = st.plotly_chart(
         fig,
         key="grid_chart",
