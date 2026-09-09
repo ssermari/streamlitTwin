@@ -42,6 +42,24 @@ INCHES_PER_UNIT          = (BASE_UNIT_FT * 12) / LOGICAL_RES_PER_BASE_UNIT  # 3.
 PALLET_SIZE_INCHES       = 52
 PALLET_SIZE_UNITS        = PALLET_SIZE_INCHES / INCHES_PER_UNIT  # ~17.33 units
 
+# code -> (label, color). Mirrors mapApp.py's PALETTE / legend-chip styling.
+# Only one category exists today (all carriers render as the same red box in
+# render_frame below) — add entries here (and branch the fillcolor in
+# render_frame) if carriers ever need to be color-coded by status/type.
+LEGEND: dict[str, tuple[str, str]] = {
+    "pallet": ("Pallet / Carrier (52\" sq)", "#FF0000"),
+}
+
+def legend_chips_html() -> str:
+    chips = []
+    for _code, (label, color) in LEGEND.items():
+        chips.append(
+            f'<span style="display:inline-flex;align-items:center;margin:2px 8px 2px 0;'
+            f'padding:2px 8px;border-radius:12px;background:{color};color:#fff;'
+            f'font-size:12px;border:1px solid rgba(0,0,0,0.15)">{label}</span>'
+        )
+    return "<div>" + "".join(chips) + "</div>"
+
 # ── MongoDB Connection ─────────────────────────────────────────────────────────
 @st.cache_resource
 def get_mongo_client():
@@ -226,6 +244,9 @@ with ctrl3:
 with ctrl4:
     st.write("")
     stop_btn = st.button("⏹ Stop", use_container_width=True)
+
+# ── Legend ─────────────────────────────────────────────────────────────────────
+st.markdown(legend_chips_html(), unsafe_allow_html=True)
 
 # ── Placeholders ───────────────────────────────────────────────────────────────
 chart_placeholder  = st.empty()
