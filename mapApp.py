@@ -253,7 +253,7 @@ def save_zone_map(db, target_coll: str, document: dict) -> tuple[bool, str]:
 # Grid / chart helpers
 # --------------------------------------------------------------------------
 
-def make_figure(grid: list[list[str]]):
+def make_figure(grid: list[list[str]], dragmode: str = "select"):
     rows = len(grid)
     cols = len(grid[0]) if rows else 0
 
@@ -297,7 +297,7 @@ def make_figure(grid: list[list[str]]):
         width=fig_width,
         height=fig_height,
         margin=dict(l=10, r=10, t=10, b=10),
-        dragmode="select",
+        dragmode=dragmode,
         legend_title_text="Type",
         plot_bgcolor="white",
     )
@@ -310,6 +310,7 @@ def make_figure(grid: list[list[str]]):
         title="X (col)",
         showgrid=False,
         zeroline=False,
+        constrain="domain",
     )
     fig.update_yaxes(
         range=[rows - 0.5, -0.5],  # row 0 at the top, like the source grid
@@ -321,6 +322,7 @@ def make_figure(grid: list[list[str]]):
         zeroline=False,
         scaleanchor="x",
         scaleratio=1,
+        constrain="domain",
     )
     return fig, fig_width, fig_height
 
@@ -555,19 +557,32 @@ def main_editor():
     st.markdown(legend_chips_html(), unsafe_allow_html=True)
 
     st.subheader("Map")
-    st.caption(
-        "Click a cell, or drag a box / lasso to select multiple cells, then use "
-        "**Apply to selection** below. You can also target an exact rectangle by "
-        "coordinates further down."
+    mode_label = st.radio(
+        "Map mode",
+        ["Select cells", "Zoom / Pan"],
+        horizontal=True,
+        label_visibility="collapsed",
+        help=(
+            "Select cells: click a cell, or drag a box / lasso to select multiple cells. "
+            "Zoom / Pan: drag to zoom into an area, or scroll to zoom in/out. Use the "
+            "toolbar's 'Reset axes' button (or double-click the map) to zoom back out."
+        ),
     )
-    fig, fig_w, fig_h = make_figure(grid)
+    dragmode = "select" if mode_label == "Select cells" else "zoom"
+    st.caption(
+        "**Select cells** mode: click a cell, or drag a box / lasso to select multiple "
+        "cells, then use **Apply to selection** below. **Zoom / Pan** mode: drag to zoom "
+        "into an area, scroll to zoom, or use the toolbar to pan / reset the view. You can "
+        "also target an exact rectangle by coordinates further down."
+    )
+    fig, fig_w, fig_h = make_figure(grid, dragmode=dragmode)
     event = st.plotly_chart(
         fig,
         key="grid_chart",
         on_select="rerun",
         width=fig_w,
         height=fig_h,
-        config={"displaylogo": False},
+        config={"displaylogo": False, "scrollZoom": True, "displayModeBar": True},
     )
 
     selected_cells = extract_selected_cells(event, rows, cols)
