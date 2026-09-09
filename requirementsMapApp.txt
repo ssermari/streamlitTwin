@@ -1,0 +1,8 @@
+streamlit>=1.50
+plotly>=5.22
+pandas>=2.0
+pymongo>=4.6
+
+# Optional: lets you try the app immediately with an in-memory database,
+# with no real MongoDB instance required (toggle "Demo mode" in the sidebar).
+mongomock>=4.1
