@@ -8,17 +8,13 @@ MongoDB for storage of the source BaseMap(s) and versioned ZoneMap(s).
 Run with:
     streamlit run app.py
 
-Configuration (all optional, set via environment variables):
+Configuration (all optional, set via environment variables and not shown in the UI):
     MONGO_URI         - connection string (default: mongodb://localhost:27017)
     MONGO_DB          - database name (default: warehouse_mapping)
-    MONGO_COLLECTION  - default source collection, holding BaseMap docs (default: base_maps)
+    MONGO_COLLECTION  - source collection, holding BaseMap docs (default: base_maps)
 
-MONGO_URI and MONGO_DB are not shown in the UI. The source collection (where
-"Start from a Base Map" looks for documents) and target collection (where
-ZoneMap versions are saved) are both plain text fields the user can edit in
-section 1; source collection defaults to MONGO_COLLECTION above but can be
-pointed at any other collection — including the target collection — to pull
-in a previously saved Zone Map as a new starting point.
+The target collection (where ZoneMap versions are saved) is always a plain
+sidebar text field the user can edit; it defaults to "target_logical_maps".
 """
 
 from __future__ import annotations
@@ -28,7 +24,6 @@ import hashlib
 import hmac
 import json
 import os
-import re
 import time
 from datetime import datetime
 
@@ -164,20 +159,6 @@ def test_connection(client, use_mock: bool) -> tuple[bool, str]:
         return False, f"Could not reach MongoDB: {exc}"
 
 
-_COLLECTION_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,255}$")
-
-
-def is_valid_collection_name(name: str) -> bool:
-    """Conservative validity check for a MongoDB collection name: non-empty,
-    no '$' or null bytes, not a reserved 'system.*' name, and restricted to a
-    safe character set (letters, digits, '_', '-', '.')."""
-    if not name:
-        return False
-    if name.startswith("system."):
-        return False
-    return bool(_COLLECTION_NAME_RE.match(name))
-
-
 def to_str_grid(raw_grid: list[list]) -> list[list[str]]:
     """Normalize a grid (ints or strings) to a grid of upper-case strings."""
     return [[str(v).strip().upper() for v in row] for row in raw_grid]
@@ -200,33 +181,20 @@ def validate_grid(grid: list[list[str]], allowed: set[str]) -> list[str]:
 
 
 def base_map_display_id(doc: dict) -> str:
-    """Human-readable identifier for a document shown in the "Start from a
-    Base Map" picker.
+    """Human-readable identifier for a BaseMap document.
 
-    Docs may be an actual BaseMap, from this app's own sample/seed format
-    ('mapId') or the fleet-manager schema ('fmModuleMapId') — or, since the
-    source collection can be pointed at a target (ZoneMap) collection to
-    reuse a previously saved map as a new starting point, a ZoneMap document
-    (identified by its 'metadata.mapName').
+    BaseMap docs may come from this app's own sample/seed format
+    ('mapId') or from the fleet-manager schema ('fmModuleMapId').
     """
-    meta = doc.get("metadata") or {}
-    return str(
-        doc.get("fmModuleMapId")
-        or doc.get("mapId")
-        or meta.get("mapName")
-        or doc.get("_id", "unknown")
-    )
+    return str(doc.get("fmModuleMapId") or doc.get("mapId") or doc.get("_id", "unknown"))
 
 
 def base_map_option_label(doc: dict) -> str:
-    meta = doc.get("metadata") or {}
     parts = [base_map_display_id(doc)]
     if doc.get("fleetManagerId"):
         parts.append(str(doc["fleetManagerId"]))
     if doc.get("name"):
         parts.append(str(doc["name"]))
-    if meta.get("versionId") is not None:
-        parts.append(f"v{meta['versionId']}")
     return " — ".join(parts)
 
 
@@ -280,29 +248,6 @@ def load_zone_map(db, target_coll: str, doc_id) -> dict | None:
         return db[target_coll].find_one({"_id": doc_id})
     except PyMongoError:
         return None
-
-
-def generate_blank_grid(width: int, height: int, fill_code: str = "1") -> list[list[str]]:
-    """Build a height x width grid filled with a single code (default '1' =
-    Legal / Movable), for starting a new map of arbitrary size from scratch."""
-    return [[fill_code for _ in range(width)] for _ in range(height)]
-
-
-def build_base_map_document(grid: list[list[str]], map_id: str, name: str = "") -> dict:
-    """BaseMap JSON in this app's own schema (mapId/grid) — also readable back
-    via extract_base_map_grid()/base_map_display_id(), which understand both
-    this schema and the fleet-manager 'fmModuleMapId'/'mapGrid' schema."""
-    height = len(grid)
-    width = len(grid[0]) if height else 0
-    return {
-        "mapId": map_id,
-        "mapType": "BaseMap",
-        "name": name or map_id,
-        "width": width,
-        "height": height,
-        "grid": grid,
-        "createdDate": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
 
 
 def seed_sample_base_map(db, source_coll: str) -> tuple[bool, str]:
@@ -519,41 +464,17 @@ def connection_controls() -> tuple[object, str, str, str, bool]:
     so the full page width is available for a wide map."""
     with st.expander("1. MongoDB connection", expanded=False):
         st.caption(
-            "Connection URI and database are configured via environment variables "
-            "and are not shown here."
+            "Connection URI, database, and source collection are configured via "
+            "environment variables and are not shown here."
         )
         uri = DEFAULT_URI
         db_name = DEFAULT_DB
-
-        st.session_state.setdefault("source_coll_override", DEFAULT_SOURCE_COLL)
-        col_src, col_tgt = st.columns(2)
-        with col_src:
-            raw_source_coll = st.text_input(
-                "Source collection (BaseMaps)",
-                value=st.session_state.source_coll_override,
-                help=(
-                    f"Where 'Start from a Base Map' looks for documents. Defaults to "
-                    f"'{DEFAULT_SOURCE_COLL}' (from the MONGO_COLLECTION environment "
-                    "variable), but you can point this at any other collection — for "
-                    "example your target collection — to pull in a previously saved "
-                    "Zone Map as a new starting point."
-                ),
-            )
-        st.session_state.source_coll_override = raw_source_coll
-        source_coll = raw_source_coll.strip() or DEFAULT_SOURCE_COLL
-        if not is_valid_collection_name(source_coll):
-            st.error(
-                f"'{source_coll}' isn't a valid MongoDB collection name — falling back "
-                f"to '{DEFAULT_SOURCE_COLL}'."
-            )
-            source_coll = DEFAULT_SOURCE_COLL
-
-        with col_tgt:
-            target_coll = st.text_input(
-                "Target collection (ZoneMaps)", value=DEFAULT_TARGET_COLL,
-                help="Where new ZoneMap versions are saved. Defaults to 'target_logical_maps'; "
-                     "type any collection name you'd like to use instead.",
-            )
+        source_coll = DEFAULT_SOURCE_COLL
+        target_coll = st.text_input(
+            "Target collection (ZoneMaps)", value=DEFAULT_TARGET_COLL,
+            help="Where new ZoneMap versions are saved. Defaults to 'target_logical_maps'; "
+                 "type any collection name you'd like to use instead.",
+        )
 
         col_a, col_b = st.columns(2)
         if col_a.button("Test connection", width="stretch"):
@@ -583,7 +504,7 @@ def load_controls(db, source_coll: str, target_coll: str):
     """Section 2: load a Base Map or a saved Zone Map. Rendered in the main
     column, above the map, using two side-by-side expanders to stay compact."""
     st.subheader("2. Load a map")
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
 
     with col1:
         with st.expander("Start from a Base Map", expanded=st.session_state.grid is None):
@@ -608,11 +529,7 @@ def load_controls(db, source_coll: str, target_coll: str):
                             )
                         else:
                             grid = to_str_grid(raw_grid)
-                            # Use the full palette here (not just {"0","1"}): the
-                            # source collection can now be pointed at a target
-                            # (ZoneMap) collection, whose grids carry the full set
-                            # of zone codes (S/P/L/T/Q) rather than just 0/1.
-                            problems = validate_grid(grid, VALID_CODES)
+                            problems = validate_grid(grid, {"0", "1"})
                             if problems:
                                 st.error("Base map failed validation:\n\n" + "\n".join(problems))
                             else:
@@ -627,11 +544,9 @@ def load_controls(db, source_coll: str, target_coll: str):
                                 st.rerun()
             else:
                 st.caption(
-                    "No documents found in this collection yet. Seed the sample above, "
+                    "No base maps found in this collection yet. Seed the sample above, or "
                     "insert your own BaseMap document with a 'fmModuleMapId' (or 'mapId') "
-                    "and a 'mapGrid' (or 'grid') field, or change the source collection "
-                    "above (section 1) to point at your target collection to reuse a "
-                    "previously saved Zone Map."
+                    "and a 'mapGrid' (or 'grid') field."
                 )
 
     with col2:
@@ -671,71 +586,6 @@ def load_controls(db, source_coll: str, target_coll: str):
                                 st.rerun()
             else:
                 st.caption("No saved zone maps yet. Save one below once you've made edits.")
-
-    with col3:
-        with st.expander("...or generate a blank grid", expanded=False):
-            st.caption(
-                "Enter a width and height to generate a new dummy map of that exact "
-                "size, filled entirely with '1' (Legal / Movable). You can then paint "
-                "zones onto it, or save/download it as-is."
-            )
-            gc1, gc2 = st.columns(2)
-            gen_width = gc1.number_input("Width (X, columns)", min_value=1, max_value=2000, value=400, step=1)
-            gen_height = gc2.number_input("Height (Y, rows)", min_value=1, max_value=2000, value=128, step=1)
-
-            cell_count = int(gen_width) * int(gen_height)
-            if cell_count > 50_000:
-                st.warning(
-                    f"That's {cell_count:,} cells — generation and rendering will work, "
-                    "but may be slow. Consider a smaller size if the app feels sluggish."
-                )
-
-            if st.button("Generate and load into editor", type="primary"):
-                grid = generate_blank_grid(int(gen_width), int(gen_height), fill_code="1")
-                map_id = f"generated-{int(gen_width)}x{int(gen_height)}"
-                st.session_state.grid = grid
-                st.session_state.grid_meta = {
-                    "mapName": map_id,
-                    "sourceMapId": map_id,
-                }
-                st.session_state.undo_stack = []
-                st.session_state["_backup_stale"] = True
-                st.rerun()
-
-            gen_map_id = f"generated-{int(gen_width)}x{int(gen_height)}"
-            preview_doc = build_base_map_document(
-                generate_blank_grid(min(int(gen_width), 3), min(int(gen_height), 3), fill_code="1"),
-                gen_map_id,
-            )
-            preview_doc["width"], preview_doc["height"] = int(gen_width), int(gen_height)
-            st.caption("BaseMap JSON shape (grid truncated for preview):")
-            st.json(preview_doc, expanded=False)
-
-            full_doc = build_base_map_document(
-                generate_blank_grid(int(gen_width), int(gen_height), fill_code="1"), gen_map_id
-            )
-            dl1, dl2 = st.columns(2)
-            with dl1:
-                st.download_button(
-                    "⬇️ Download as BaseMap JSON",
-                    data=json.dumps(full_doc, indent=2),
-                    file_name=f"{gen_map_id}.json",
-                    mime="application/json",
-                    width="stretch",
-                )
-            with dl2:
-                if st.button("Insert as new BaseMap into MongoDB", width="stretch"):
-                    try:
-                        if db[source_coll].find_one({"mapId": full_doc["mapId"]}):
-                            st.warning(
-                                f"A BaseMap with mapId '{full_doc['mapId']}' already exists "
-                                "in this collection; nothing was inserted."
-                            )
-                        else:
-                            db[source_coll].insert_one(dict(full_doc))
-                            st.success(f"Inserted BaseMap '{full_doc['mapId']}' into MongoDB.")
-                    except PyMongoError as exc:
-                        st.error(f"Could not insert BaseMap: {exc}")
 
 
 def save_controls(db, target_coll: str):

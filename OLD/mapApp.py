@@ -253,7 +253,12 @@ def save_zone_map(db, target_coll: str, document: dict) -> tuple[bool, str]:
 # Grid / chart helpers
 # --------------------------------------------------------------------------
 
-def make_figure(grid: list[list[str]]):
+def make_figure(
+    grid: list[list[str]],
+    dragmode: str = "select",
+    max_width_px: int = 1000,
+    max_height_px: int = 650,
+):
     rows = len(grid)
     cols = len(grid[0]) if rows else 0
 
@@ -288,18 +293,43 @@ def make_figure(grid: list[list[str]]):
         unselected=dict(marker=dict(opacity=0.55)),
     )
 
-    cell_px = max(12, min(34, int(600 / max(rows, cols, 1))))
-    fig_width = cell_px * cols + 260
-    fig_height = cell_px * rows + 90
+    # Fixed chrome around the plot area: left/right/top/bottom margins, plus a
+    # reserved column to the right for the legend. Sizing fig_width/fig_height
+    # to exactly this chrome + the plot pixels (no extra padding) keeps the
+    # container tight to the actual map — important because the axes are
+    # locked to a 1:1 scale, so any slack we leave in one dimension just
+    # becomes dead space once that lock shrinks the plotting domain to fit.
+    MARGIN_L, MARGIN_R, MARGIN_T, MARGIN_B = 10, 10, 10, 10
+    LEGEND_RESERVE_PX = 190
+    MIN_CELL_PX, MAX_CELL_PX = 4, 34
+
+    # Fit-to-bounding-box sizing: pick the largest square cell size that keeps
+    # BOTH the full width (including margins + legend) under max_width_px AND
+    # the full height under max_height_px. This is computed directly from the
+    # grid's own aspect ratio, so a wide-but-short grid (e.g. 100x32) ends up
+    # wide-but-short on screen too, instead of being forced into a fixed
+    # height that leaves dead space above/below once the 1:1 scale lock
+    # shrinks the plotting domain to match. Previously a hard 12px/cell floor
+    # made fig_width balloon past the real container width on wide grids,
+    # which is what caused that leftover vertical whitespace.
+    width_budget = max(max_width_px - MARGIN_L - MARGIN_R - LEGEND_RESERVE_PX, MIN_CELL_PX)
+    height_budget = max(max_height_px - MARGIN_T - MARGIN_B, MIN_CELL_PX)
+    cell_w = width_budget / max(cols, 1)
+    cell_h = height_budget / max(rows, 1)
+    cell_px = max(MIN_CELL_PX, min(MAX_CELL_PX, cell_w, cell_h))
+
+    fig_width = int(round(cell_px * cols + MARGIN_L + MARGIN_R + LEGEND_RESERVE_PX))
+    fig_height = int(round(cell_px * rows + MARGIN_T + MARGIN_B))
 
     fig.update_traces(marker=dict(size=cell_px * 0.92))
     fig.update_layout(
         width=fig_width,
         height=fig_height,
-        margin=dict(l=10, r=10, t=10, b=10),
-        dragmode="select",
+        margin=dict(l=MARGIN_L, r=MARGIN_R, t=MARGIN_T, b=MARGIN_B),
+        dragmode=dragmode,
         legend_title_text="Type",
         plot_bgcolor="white",
+        paper_bgcolor="white",
     )
     tick_step = 1 if max(rows, cols) <= 40 else 5
     fig.update_xaxes(
@@ -310,6 +340,7 @@ def make_figure(grid: list[list[str]]):
         title="X (col)",
         showgrid=False,
         zeroline=False,
+        constrain="domain",
     )
     fig.update_yaxes(
         range=[rows - 0.5, -0.5],  # row 0 at the top, like the source grid
@@ -321,6 +352,7 @@ def make_figure(grid: list[list[str]]):
         zeroline=False,
         scaleanchor="x",
         scaleratio=1,
+        constrain="domain",
     )
     return fig, fig_width, fig_height
 
@@ -368,175 +400,190 @@ def init_state():
         "grid_meta": {},
         "undo_stack": [],
         "use_mock": False,
+        "map_width_px": 1000,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
 
-def sidebar_connection() -> tuple[object, str, str, str, bool]:
-    st.sidebar.header("1. MongoDB connection")
-    st.sidebar.caption(
-        "Connection URI, database, and source collection are configured via "
-        "environment variables and are not shown here."
-    )
-    uri = DEFAULT_URI
-    db_name = DEFAULT_DB
-    source_coll = DEFAULT_SOURCE_COLL
-    target_coll = st.sidebar.text_input(
-        "Target collection (ZoneMaps)", value=DEFAULT_TARGET_COLL,
-        help="Where new ZoneMap versions are saved. Defaults to 'target_logical_maps'; "
-             "type any collection name you'd like to use instead.",
-    )
-
-    col_a, col_b = st.sidebar.columns(2)
-    if col_a.button("Test connection", width="stretch"):
-        client = get_client(uri, False)
-        ok, msg = test_connection(client, False)
-        (st.sidebar.success if ok else st.sidebar.error)(msg)
-        if not ok and not MONGOMOCK_AVAILABLE:
-            st.sidebar.info("Install `mongomock` to try the app without a real MongoDB instance.")
-
-    if MONGOMOCK_AVAILABLE:
-        st.session_state.use_mock = col_b.toggle(
-            "Demo mode", value=st.session_state.use_mock,
-            help="Use an in-memory database instead of the configured connection. Nothing is persisted.",
+def connection_controls() -> tuple[object, str, str, str, bool]:
+    """Section 1: MongoDB connection. Rendered in the main column (no sidebar)
+    so the full page width is available for a wide map."""
+    with st.expander("1. MongoDB connection", expanded=False):
+        st.caption(
+            "Connection URI, database, and source collection are configured via "
+            "environment variables and are not shown here."
         )
-    else:
-        st.session_state.use_mock = False
+        uri = DEFAULT_URI
+        db_name = DEFAULT_DB
+        source_coll = DEFAULT_SOURCE_COLL
+        target_coll = st.text_input(
+            "Target collection (ZoneMaps)", value=DEFAULT_TARGET_COLL,
+            help="Where new ZoneMap versions are saved. Defaults to 'target_logical_maps'; "
+                 "type any collection name you'd like to use instead.",
+        )
 
-    use_mock = st.session_state.use_mock
-    client = get_client(uri if not use_mock else "mock", use_mock)
-    if use_mock:
-        st.sidebar.caption("🧪 Demo mode: in-memory MongoDB (mongomock). Data resets on restart.")
-    db = client[db_name]
+        col_a, col_b = st.columns(2)
+        if col_a.button("Test connection", width="stretch"):
+            client = get_client(uri, False)
+            ok, msg = test_connection(client, False)
+            (st.success if ok else st.error)(msg)
+            if not ok and not MONGOMOCK_AVAILABLE:
+                st.info("Install `mongomock` to try the app without a real MongoDB instance.")
+
+        if MONGOMOCK_AVAILABLE:
+            st.session_state.use_mock = col_b.toggle(
+                "Demo mode", value=st.session_state.use_mock,
+                help="Use an in-memory database instead of the configured connection. Nothing is persisted.",
+            )
+        else:
+            st.session_state.use_mock = False
+
+        use_mock = st.session_state.use_mock
+        client = get_client(uri if not use_mock else "mock", use_mock)
+        if use_mock:
+            st.caption("🧪 Demo mode: in-memory MongoDB (mongomock). Data resets on restart.")
+        db = client[db_name]
     return db, source_coll, target_coll, uri, use_mock
 
 
-def sidebar_load(db, source_coll: str, target_coll: str):
-    st.sidebar.header("2. Load a map")
+def load_controls(db, source_coll: str, target_coll: str):
+    """Section 2: load a Base Map or a saved Zone Map. Rendered in the main
+    column, above the map, using two side-by-side expanders to stay compact."""
+    st.subheader("2. Load a map")
+    col1, col2 = st.columns(2)
 
-    with st.sidebar.expander("Start from a Base Map", expanded=st.session_state.grid is None):
-        if st.button("Seed sample BaseMap into MongoDB"):
-            ok, msg = seed_sample_base_map(db, source_coll)
-            (st.success if ok else st.warning)(msg)
+    with col1:
+        with st.expander("Start from a Base Map", expanded=st.session_state.grid is None):
+            if st.button("Seed sample BaseMap into MongoDB"):
+                ok, msg = seed_sample_base_map(db, source_coll)
+                (st.success if ok else st.warning)(msg)
 
-        base_maps = list_base_maps(db, source_coll)
-        if base_maps:
-            options = {base_map_option_label(d): d["_id"] for d in base_maps}
-            choice = st.selectbox("Available base maps", list(options.keys()))
-            if st.button("Load base map", type="primary"):
-                doc = load_base_map(db, source_coll, options[choice])
-                if doc is None:
-                    st.error("Could not reload that base map document.")
-                else:
-                    raw_grid = extract_base_map_grid(doc)
-                    if raw_grid is None:
-                        st.error(
-                            "That base map document has no 'mapGrid' or 'grid' field, "
-                            "so it can't be loaded. Check that it's a valid BaseMap document."
-                        )
-                    else:
-                        grid = to_str_grid(raw_grid)
-                        problems = validate_grid(grid, {"0", "1"})
-                        if problems:
-                            st.error("Base map failed validation:\n\n" + "\n".join(problems))
-                        else:
-                            map_id = base_map_display_id(doc)
-                            st.session_state.grid = grid
-                            st.session_state.grid_meta = {
-                                "mapName": map_id,
-                                "sourceMapId": map_id,
-                            }
-                            st.session_state.undo_stack = []
-                            st.session_state["_backup_stale"] = True
-                            st.rerun()
-        else:
-            st.caption(
-                "No base maps found in this collection yet. Seed the sample above, or insert "
-                "your own BaseMap document with a 'fmModuleMapId' (or 'mapId') and a "
-                "'mapGrid' (or 'grid') field."
-            )
-
-    with st.sidebar.expander("...or continue a saved Zone Map"):
-        names = list_zone_map_names(db, target_coll)
-        if names:
-            map_name = st.selectbox("Map name", names, key="zm_name_select")
-            versions = list_zone_map_versions(db, target_coll, map_name)
-            if versions:
-                v_options = {
-                    f'v{d["metadata"]["versionId"]} — {d["metadata"].get("changeDate", "")}': d["_id"]
-                    for d in versions
-                }
-                v_choice = st.selectbox("Version", list(v_options.keys()), key="zm_version_select")
-                if st.button("Load this version", type="primary"):
-                    doc = load_zone_map(db, target_coll, v_options[v_choice])
+            base_maps = list_base_maps(db, source_coll)
+            if base_maps:
+                options = {base_map_option_label(d): d["_id"] for d in base_maps}
+                choice = st.selectbox("Available base maps", list(options.keys()))
+                if st.button("Load base map", type="primary"):
+                    doc = load_base_map(db, source_coll, options[choice])
                     if doc is None:
-                        st.error("Could not reload that zone map document.")
-                    elif "grid" not in doc:
-                        st.error(
-                            "That zone map document has no 'grid' field, so it can't be loaded. "
-                            "Check that it's a valid ZoneMap document."
-                        )
+                        st.error("Could not reload that base map document.")
                     else:
-                        grid = to_str_grid(doc["grid"])
-                        problems = validate_grid(grid, VALID_CODES)
-                        if problems:
-                            st.error("Saved zone map failed validation:\n\n" + "\n".join(problems))
+                        raw_grid = extract_base_map_grid(doc)
+                        if raw_grid is None:
+                            st.error(
+                                "That base map document has no 'mapGrid' or 'grid' field, "
+                                "so it can't be loaded. Check that it's a valid BaseMap document."
+                            )
                         else:
-                            st.session_state.grid = grid
-                            st.session_state.grid_meta = {
-                                "mapName": doc["metadata"].get("mapName", map_name),
-                                "sourceMapId": doc["metadata"].get("sourceMapId", ""),
-                            }
-                            st.session_state.undo_stack = []
-                            st.session_state["_backup_stale"] = True
-                            st.rerun()
-        else:
-            st.caption("No saved zone maps yet. Save one below once you've made edits.")
+                            grid = to_str_grid(raw_grid)
+                            problems = validate_grid(grid, {"0", "1"})
+                            if problems:
+                                st.error("Base map failed validation:\n\n" + "\n".join(problems))
+                            else:
+                                map_id = base_map_display_id(doc)
+                                st.session_state.grid = grid
+                                st.session_state.grid_meta = {
+                                    "mapName": map_id,
+                                    "sourceMapId": map_id,
+                                }
+                                st.session_state.undo_stack = []
+                                st.session_state["_backup_stale"] = True
+                                st.rerun()
+            else:
+                st.caption(
+                    "No base maps found in this collection yet. Seed the sample above, or "
+                    "insert your own BaseMap document with a 'fmModuleMapId' (or 'mapId') "
+                    "and a 'mapGrid' (or 'grid') field."
+                )
+
+    with col2:
+        with st.expander("...or continue a saved Zone Map"):
+            names = list_zone_map_names(db, target_coll)
+            if names:
+                map_name = st.selectbox("Map name", names, key="zm_name_select")
+                versions = list_zone_map_versions(db, target_coll, map_name)
+                if versions:
+                    v_options = {
+                        f'v{d["metadata"]["versionId"]} — {d["metadata"].get("changeDate", "")}': d["_id"]
+                        for d in versions
+                    }
+                    v_choice = st.selectbox("Version", list(v_options.keys()), key="zm_version_select")
+                    if st.button("Load this version", type="primary"):
+                        doc = load_zone_map(db, target_coll, v_options[v_choice])
+                        if doc is None:
+                            st.error("Could not reload that zone map document.")
+                        elif "grid" not in doc:
+                            st.error(
+                                "That zone map document has no 'grid' field, so it can't be "
+                                "loaded. Check that it's a valid ZoneMap document."
+                            )
+                        else:
+                            grid = to_str_grid(doc["grid"])
+                            problems = validate_grid(grid, VALID_CODES)
+                            if problems:
+                                st.error("Saved zone map failed validation:\n\n" + "\n".join(problems))
+                            else:
+                                st.session_state.grid = grid
+                                st.session_state.grid_meta = {
+                                    "mapName": doc["metadata"].get("mapName", map_name),
+                                    "sourceMapId": doc["metadata"].get("sourceMapId", ""),
+                                }
+                                st.session_state.undo_stack = []
+                                st.session_state["_backup_stale"] = True
+                                st.rerun()
+            else:
+                st.caption("No saved zone maps yet. Save one below once you've made edits.")
 
 
-def sidebar_save(db, target_coll: str):
-    st.sidebar.header("3. Save")
+def save_controls(db, target_coll: str):
+    """Section 3: save a new Zone Map version. Rendered in the main column,
+    below the map."""
+    st.subheader("3. Save")
     if st.session_state.grid is None:
-        st.sidebar.caption("Load a map first.")
+        st.caption("Load a map first.")
         return
 
     meta = st.session_state.grid_meta
-    map_name = st.sidebar.text_input("Map name", value=meta.get("mapName", "warehouse-map"))
-    source_map_id = st.sidebar.text_input("Source map ID", value=meta.get("sourceMapId", ""))
-    change_date = st.sidebar.text_input(
-        "Change date (plain text)",
-        value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    )
-    notes = st.sidebar.text_area("Notes (optional)", value="")
+    col1, col2 = st.columns(2)
+    with col1:
+        map_name = st.text_input("Map name", value=meta.get("mapName", "warehouse-map"))
+        change_date = st.text_input(
+            "Change date (plain text)",
+            value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+    with col2:
+        source_map_id = st.text_input("Source map ID", value=meta.get("sourceMapId", ""))
+        notes = st.text_area("Notes (optional)", value="", height=68)
 
     document = build_zone_map_document(
         st.session_state.grid, map_name, source_map_id, notes, change_date
     )
 
-    if st.sidebar.button("💾 Save new version to MongoDB", type="primary"):
-        ok, info = save_zone_map(db, target_coll, document)
-        if ok:
-            st.session_state.grid_meta["mapName"] = map_name
-            st.session_state.grid_meta["sourceMapId"] = source_map_id
-            st.session_state["_last_save_msg"] = (
-                f"Saved as versionId={document['metadata']['versionId']} (_id={info})"
-            )
-            st.rerun()
-        else:
-            st.sidebar.error(info)
+    btn_col1, btn_col2 = st.columns(2)
+    with btn_col1:
+        if st.button("💾 Save new version to MongoDB", type="primary", width="stretch"):
+            ok, info = save_zone_map(db, target_coll, document)
+            if ok:
+                st.session_state.grid_meta["mapName"] = map_name
+                st.session_state.grid_meta["sourceMapId"] = source_map_id
+                st.session_state["_last_save_msg"] = (
+                    f"Saved as versionId={document['metadata']['versionId']} (_id={info})"
+                )
+                st.rerun()
+            else:
+                st.error(info)
+    with btn_col2:
+        st.download_button(
+            "⬇️ Download this version as JSON",
+            data=json.dumps(document, indent=2),
+            file_name=f'{map_name}_v{document["metadata"]["versionId"]}.json',
+            mime="application/json",
+            width="stretch",
+        )
 
     if st.session_state.get("_last_save_msg"):
-        st.sidebar.success(st.session_state.pop("_last_save_msg"))
-
-    st.sidebar.download_button(
-        "⬇️ Download this version as JSON",
-        data=json.dumps(document, indent=2),
-        file_name=f'{map_name}_v{document["metadata"]["versionId"]}.json',
-        mime="application/json",
-        width="stretch",
-    )
+        st.success(st.session_state.pop("_last_save_msg"))
 
 
 def main_editor():
@@ -555,34 +602,77 @@ def main_editor():
     st.markdown(legend_chips_html(), unsafe_allow_html=True)
 
     st.subheader("Map")
+
+    # The chart's current selection is stored in session_state under its own
+    # widget key ("grid_chart") as soon as the user interacts with it, and
+    # that happens BEFORE Streamlit reruns the script — so it's already
+    # available here, ahead of rendering the chart itself. That lets us put
+    # the Apply/Undo buttons in the same row as the mode toggle, above the
+    # map, instead of a separate row that adds vertical space.
+    prior_event = st.session_state.get("grid_chart")
+    selected_cells = extract_selected_cells(prior_event, rows, cols)
+
+    mode_col, apply_col, undo_col = st.columns([2, 1.4, 1.1], gap="medium")
+    with mode_col:
+        mode_label = st.radio(
+            "Map mode",
+            ["Select cells", "Zoom / Pan"],
+            horizontal=True,
+            label_visibility="collapsed",
+            help=(
+                "Select cells: click a cell, or drag a box / lasso to select multiple cells. "
+                "Zoom / Pan: drag to zoom into an area, or scroll to zoom in/out. Use the "
+                "toolbar's 'Reset axes' button (or double-click the map) to zoom back out."
+            ),
+        )
+    with apply_col:
+        apply_clicked = st.button(
+            f"Apply '{apply_type}' to selection ({len(selected_cells)})",
+            disabled=not selected_cells,
+            type="primary",
+            width="stretch",
+        )
+    with undo_col:
+        undo_clicked = st.button(
+            "Undo last change",
+            disabled=not st.session_state.undo_stack,
+            width="stretch",
+        )
+    dragmode = "select" if mode_label == "Select cells" else "zoom"
     st.caption(
-        "Click a cell, or drag a box / lasso to select multiple cells, then use "
-        "**Apply to selection** below. You can also target an exact rectangle by "
-        "coordinates further down."
+        "**Select cells** mode: click a cell, or drag a box / lasso to select multiple "
+        "cells, then use **Apply to selection** above. **Zoom / Pan** mode: drag to zoom "
+        "into an area, scroll to zoom, or use the toolbar to pan / reset the view. You can "
+        "also target an exact rectangle by coordinates further down."
     )
-    fig, fig_w, fig_h = make_figure(grid)
+    st.session_state.map_width_px = st.slider(
+        "Max map display width (px)",
+        min_value=500,
+        max_value=1800,
+        value=st.session_state.map_width_px,
+        step=50,
+        help=(
+            "The map is sized to fit within this width while keeping cells square. "
+            "If you still see empty space to the side or the map looks compressed, "
+            "lower this to roughly match your browser window's width; raise it on a "
+            "wider monitor. This mainly matters for grids much wider than they are tall."
+        ),
+    )
+    fig, fig_w, fig_h = make_figure(
+        grid, dragmode=dragmode, max_width_px=st.session_state.map_width_px
+    )
     event = st.plotly_chart(
         fig,
         key="grid_chart",
         on_select="rerun",
         width=fig_w,
         height=fig_h,
-        config={"displaylogo": False},
+        config={"displaylogo": False, "scrollZoom": True, "displayModeBar": True},
     )
-
-    selected_cells = extract_selected_cells(event, rows, cols)
-
-    c1, c2, c3 = st.columns([2, 1, 1])
-    with c1:
-        st.caption(f"**{len(selected_cells)}** cell(s) currently selected on the map.")
-    with c2:
-        apply_clicked = st.button(
-            f"Apply '{apply_type}' to selection",
-            disabled=not selected_cells,
-            type="primary",
-        )
-    with c3:
-        undo_clicked = st.button("Undo last change", disabled=not st.session_state.undo_stack)
+    # Refresh selected_cells from this run's event too, so that if the user's
+    # click both changed the selection AND landed on this same rerun as an
+    # Apply/Undo click, downstream logic still sees the latest selection.
+    selected_cells = extract_selected_cells(event, rows, cols) or selected_cells
 
     if apply_clicked and selected_cells:
         push_undo()
@@ -647,19 +737,22 @@ def main():
     )
 
     init_state()
-    db, source_coll, target_coll, uri, use_mock = sidebar_connection()
-    sidebar_load(db, source_coll, target_coll)
-    sidebar_save(db, target_coll)
+
+    db, source_coll, target_coll, uri, use_mock = connection_controls()
+    load_controls(db, source_coll, target_coll)
 
     if st.session_state.grid is None:
-        st.info("👈 Load a Base Map or a saved Zone Map from the sidebar to begin editing.")
+        st.info("👆 Load a Base Map or a saved Zone Map above to begin editing.")
         return
 
     if "_loaded_grid_backup" not in st.session_state or st.session_state.get("_backup_stale", True):
         st.session_state["_loaded_grid_backup"] = copy.deepcopy(st.session_state.grid)
         st.session_state["_backup_stale"] = False
 
+    st.divider()
     main_editor()
+    st.divider()
+    save_controls(db, target_coll)
 
 
 if __name__ == "__main__":
