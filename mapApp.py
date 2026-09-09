@@ -386,169 +386,183 @@ def init_state():
             st.session_state[k] = v
 
 
-def sidebar_connection() -> tuple[object, str, str, str, bool]:
-    st.sidebar.header("1. MongoDB connection")
-    st.sidebar.caption(
-        "Connection URI, database, and source collection are configured via "
-        "environment variables and are not shown here."
-    )
-    uri = DEFAULT_URI
-    db_name = DEFAULT_DB
-    source_coll = DEFAULT_SOURCE_COLL
-    target_coll = st.sidebar.text_input(
-        "Target collection (ZoneMaps)", value=DEFAULT_TARGET_COLL,
-        help="Where new ZoneMap versions are saved. Defaults to 'target_logical_maps'; "
-             "type any collection name you'd like to use instead.",
-    )
-
-    col_a, col_b = st.sidebar.columns(2)
-    if col_a.button("Test connection", width="stretch"):
-        client = get_client(uri, False)
-        ok, msg = test_connection(client, False)
-        (st.sidebar.success if ok else st.sidebar.error)(msg)
-        if not ok and not MONGOMOCK_AVAILABLE:
-            st.sidebar.info("Install `mongomock` to try the app without a real MongoDB instance.")
-
-    if MONGOMOCK_AVAILABLE:
-        st.session_state.use_mock = col_b.toggle(
-            "Demo mode", value=st.session_state.use_mock,
-            help="Use an in-memory database instead of the configured connection. Nothing is persisted.",
+def connection_controls() -> tuple[object, str, str, str, bool]:
+    """Section 1: MongoDB connection. Rendered in the main column (no sidebar)
+    so the full page width is available for a wide map."""
+    with st.expander("1. MongoDB connection", expanded=False):
+        st.caption(
+            "Connection URI, database, and source collection are configured via "
+            "environment variables and are not shown here."
         )
-    else:
-        st.session_state.use_mock = False
+        uri = DEFAULT_URI
+        db_name = DEFAULT_DB
+        source_coll = DEFAULT_SOURCE_COLL
+        target_coll = st.text_input(
+            "Target collection (ZoneMaps)", value=DEFAULT_TARGET_COLL,
+            help="Where new ZoneMap versions are saved. Defaults to 'target_logical_maps'; "
+                 "type any collection name you'd like to use instead.",
+        )
 
-    use_mock = st.session_state.use_mock
-    client = get_client(uri if not use_mock else "mock", use_mock)
-    if use_mock:
-        st.sidebar.caption("🧪 Demo mode: in-memory MongoDB (mongomock). Data resets on restart.")
-    db = client[db_name]
+        col_a, col_b = st.columns(2)
+        if col_a.button("Test connection", width="stretch"):
+            client = get_client(uri, False)
+            ok, msg = test_connection(client, False)
+            (st.success if ok else st.error)(msg)
+            if not ok and not MONGOMOCK_AVAILABLE:
+                st.info("Install `mongomock` to try the app without a real MongoDB instance.")
+
+        if MONGOMOCK_AVAILABLE:
+            st.session_state.use_mock = col_b.toggle(
+                "Demo mode", value=st.session_state.use_mock,
+                help="Use an in-memory database instead of the configured connection. Nothing is persisted.",
+            )
+        else:
+            st.session_state.use_mock = False
+
+        use_mock = st.session_state.use_mock
+        client = get_client(uri if not use_mock else "mock", use_mock)
+        if use_mock:
+            st.caption("🧪 Demo mode: in-memory MongoDB (mongomock). Data resets on restart.")
+        db = client[db_name]
     return db, source_coll, target_coll, uri, use_mock
 
 
-def sidebar_load(db, source_coll: str, target_coll: str):
-    st.sidebar.header("2. Load a map")
+def load_controls(db, source_coll: str, target_coll: str):
+    """Section 2: load a Base Map or a saved Zone Map. Rendered in the main
+    column, above the map, using two side-by-side expanders to stay compact."""
+    st.subheader("2. Load a map")
+    col1, col2 = st.columns(2)
 
-    with st.sidebar.expander("Start from a Base Map", expanded=st.session_state.grid is None):
-        if st.button("Seed sample BaseMap into MongoDB"):
-            ok, msg = seed_sample_base_map(db, source_coll)
-            (st.success if ok else st.warning)(msg)
+    with col1:
+        with st.expander("Start from a Base Map", expanded=st.session_state.grid is None):
+            if st.button("Seed sample BaseMap into MongoDB"):
+                ok, msg = seed_sample_base_map(db, source_coll)
+                (st.success if ok else st.warning)(msg)
 
-        base_maps = list_base_maps(db, source_coll)
-        if base_maps:
-            options = {base_map_option_label(d): d["_id"] for d in base_maps}
-            choice = st.selectbox("Available base maps", list(options.keys()))
-            if st.button("Load base map", type="primary"):
-                doc = load_base_map(db, source_coll, options[choice])
-                if doc is None:
-                    st.error("Could not reload that base map document.")
-                else:
-                    raw_grid = extract_base_map_grid(doc)
-                    if raw_grid is None:
-                        st.error(
-                            "That base map document has no 'mapGrid' or 'grid' field, "
-                            "so it can't be loaded. Check that it's a valid BaseMap document."
-                        )
-                    else:
-                        grid = to_str_grid(raw_grid)
-                        problems = validate_grid(grid, {"0", "1"})
-                        if problems:
-                            st.error("Base map failed validation:\n\n" + "\n".join(problems))
-                        else:
-                            map_id = base_map_display_id(doc)
-                            st.session_state.grid = grid
-                            st.session_state.grid_meta = {
-                                "mapName": map_id,
-                                "sourceMapId": map_id,
-                            }
-                            st.session_state.undo_stack = []
-                            st.session_state["_backup_stale"] = True
-                            st.rerun()
-        else:
-            st.caption(
-                "No base maps found in this collection yet. Seed the sample above, or insert "
-                "your own BaseMap document with a 'fmModuleMapId' (or 'mapId') and a "
-                "'mapGrid' (or 'grid') field."
-            )
-
-    with st.sidebar.expander("...or continue a saved Zone Map"):
-        names = list_zone_map_names(db, target_coll)
-        if names:
-            map_name = st.selectbox("Map name", names, key="zm_name_select")
-            versions = list_zone_map_versions(db, target_coll, map_name)
-            if versions:
-                v_options = {
-                    f'v{d["metadata"]["versionId"]} — {d["metadata"].get("changeDate", "")}': d["_id"]
-                    for d in versions
-                }
-                v_choice = st.selectbox("Version", list(v_options.keys()), key="zm_version_select")
-                if st.button("Load this version", type="primary"):
-                    doc = load_zone_map(db, target_coll, v_options[v_choice])
+            base_maps = list_base_maps(db, source_coll)
+            if base_maps:
+                options = {base_map_option_label(d): d["_id"] for d in base_maps}
+                choice = st.selectbox("Available base maps", list(options.keys()))
+                if st.button("Load base map", type="primary"):
+                    doc = load_base_map(db, source_coll, options[choice])
                     if doc is None:
-                        st.error("Could not reload that zone map document.")
-                    elif "grid" not in doc:
-                        st.error(
-                            "That zone map document has no 'grid' field, so it can't be loaded. "
-                            "Check that it's a valid ZoneMap document."
-                        )
+                        st.error("Could not reload that base map document.")
                     else:
-                        grid = to_str_grid(doc["grid"])
-                        problems = validate_grid(grid, VALID_CODES)
-                        if problems:
-                            st.error("Saved zone map failed validation:\n\n" + "\n".join(problems))
+                        raw_grid = extract_base_map_grid(doc)
+                        if raw_grid is None:
+                            st.error(
+                                "That base map document has no 'mapGrid' or 'grid' field, "
+                                "so it can't be loaded. Check that it's a valid BaseMap document."
+                            )
                         else:
-                            st.session_state.grid = grid
-                            st.session_state.grid_meta = {
-                                "mapName": doc["metadata"].get("mapName", map_name),
-                                "sourceMapId": doc["metadata"].get("sourceMapId", ""),
-                            }
-                            st.session_state.undo_stack = []
-                            st.session_state["_backup_stale"] = True
-                            st.rerun()
-        else:
-            st.caption("No saved zone maps yet. Save one below once you've made edits.")
+                            grid = to_str_grid(raw_grid)
+                            problems = validate_grid(grid, {"0", "1"})
+                            if problems:
+                                st.error("Base map failed validation:\n\n" + "\n".join(problems))
+                            else:
+                                map_id = base_map_display_id(doc)
+                                st.session_state.grid = grid
+                                st.session_state.grid_meta = {
+                                    "mapName": map_id,
+                                    "sourceMapId": map_id,
+                                }
+                                st.session_state.undo_stack = []
+                                st.session_state["_backup_stale"] = True
+                                st.rerun()
+            else:
+                st.caption(
+                    "No base maps found in this collection yet. Seed the sample above, or "
+                    "insert your own BaseMap document with a 'fmModuleMapId' (or 'mapId') "
+                    "and a 'mapGrid' (or 'grid') field."
+                )
+
+    with col2:
+        with st.expander("...or continue a saved Zone Map"):
+            names = list_zone_map_names(db, target_coll)
+            if names:
+                map_name = st.selectbox("Map name", names, key="zm_name_select")
+                versions = list_zone_map_versions(db, target_coll, map_name)
+                if versions:
+                    v_options = {
+                        f'v{d["metadata"]["versionId"]} — {d["metadata"].get("changeDate", "")}': d["_id"]
+                        for d in versions
+                    }
+                    v_choice = st.selectbox("Version", list(v_options.keys()), key="zm_version_select")
+                    if st.button("Load this version", type="primary"):
+                        doc = load_zone_map(db, target_coll, v_options[v_choice])
+                        if doc is None:
+                            st.error("Could not reload that zone map document.")
+                        elif "grid" not in doc:
+                            st.error(
+                                "That zone map document has no 'grid' field, so it can't be "
+                                "loaded. Check that it's a valid ZoneMap document."
+                            )
+                        else:
+                            grid = to_str_grid(doc["grid"])
+                            problems = validate_grid(grid, VALID_CODES)
+                            if problems:
+                                st.error("Saved zone map failed validation:\n\n" + "\n".join(problems))
+                            else:
+                                st.session_state.grid = grid
+                                st.session_state.grid_meta = {
+                                    "mapName": doc["metadata"].get("mapName", map_name),
+                                    "sourceMapId": doc["metadata"].get("sourceMapId", ""),
+                                }
+                                st.session_state.undo_stack = []
+                                st.session_state["_backup_stale"] = True
+                                st.rerun()
+            else:
+                st.caption("No saved zone maps yet. Save one below once you've made edits.")
 
 
-def sidebar_save(db, target_coll: str):
-    st.sidebar.header("3. Save")
+def save_controls(db, target_coll: str):
+    """Section 3: save a new Zone Map version. Rendered in the main column,
+    below the map."""
+    st.subheader("3. Save")
     if st.session_state.grid is None:
-        st.sidebar.caption("Load a map first.")
+        st.caption("Load a map first.")
         return
 
     meta = st.session_state.grid_meta
-    map_name = st.sidebar.text_input("Map name", value=meta.get("mapName", "warehouse-map"))
-    source_map_id = st.sidebar.text_input("Source map ID", value=meta.get("sourceMapId", ""))
-    change_date = st.sidebar.text_input(
-        "Change date (plain text)",
-        value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    )
-    notes = st.sidebar.text_area("Notes (optional)", value="")
+    col1, col2 = st.columns(2)
+    with col1:
+        map_name = st.text_input("Map name", value=meta.get("mapName", "warehouse-map"))
+        change_date = st.text_input(
+            "Change date (plain text)",
+            value=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+    with col2:
+        source_map_id = st.text_input("Source map ID", value=meta.get("sourceMapId", ""))
+        notes = st.text_area("Notes (optional)", value="", height=68)
 
     document = build_zone_map_document(
         st.session_state.grid, map_name, source_map_id, notes, change_date
     )
 
-    if st.sidebar.button("💾 Save new version to MongoDB", type="primary"):
-        ok, info = save_zone_map(db, target_coll, document)
-        if ok:
-            st.session_state.grid_meta["mapName"] = map_name
-            st.session_state.grid_meta["sourceMapId"] = source_map_id
-            st.session_state["_last_save_msg"] = (
-                f"Saved as versionId={document['metadata']['versionId']} (_id={info})"
-            )
-            st.rerun()
-        else:
-            st.sidebar.error(info)
+    btn_col1, btn_col2 = st.columns(2)
+    with btn_col1:
+        if st.button("💾 Save new version to MongoDB", type="primary", width="stretch"):
+            ok, info = save_zone_map(db, target_coll, document)
+            if ok:
+                st.session_state.grid_meta["mapName"] = map_name
+                st.session_state.grid_meta["sourceMapId"] = source_map_id
+                st.session_state["_last_save_msg"] = (
+                    f"Saved as versionId={document['metadata']['versionId']} (_id={info})"
+                )
+                st.rerun()
+            else:
+                st.error(info)
+    with btn_col2:
+        st.download_button(
+            "⬇️ Download this version as JSON",
+            data=json.dumps(document, indent=2),
+            file_name=f'{map_name}_v{document["metadata"]["versionId"]}.json',
+            mime="application/json",
+            width="stretch",
+        )
 
     if st.session_state.get("_last_save_msg"):
-        st.sidebar.success(st.session_state.pop("_last_save_msg"))
-
-    st.sidebar.download_button(
-        "⬇️ Download this version as JSON",
-        data=json.dumps(document, indent=2),
-        file_name=f'{map_name}_v{document["metadata"]["versionId"]}.json',
-        mime="application/json",
-        width="stretch",
-    )
+        st.success(st.session_state.pop("_last_save_msg"))
 
 
 def main_editor():
@@ -672,19 +686,22 @@ def main():
     )
 
     init_state()
-    db, source_coll, target_coll, uri, use_mock = sidebar_connection()
-    sidebar_load(db, source_coll, target_coll)
-    sidebar_save(db, target_coll)
+
+    db, source_coll, target_coll, uri, use_mock = connection_controls()
+    load_controls(db, source_coll, target_coll)
 
     if st.session_state.grid is None:
-        st.info("👈 Load a Base Map or a saved Zone Map from the sidebar to begin editing.")
+        st.info("👆 Load a Base Map or a saved Zone Map above to begin editing.")
         return
 
     if "_loaded_grid_backup" not in st.session_state or st.session_state.get("_backup_stale", True):
         st.session_state["_loaded_grid_backup"] = copy.deepcopy(st.session_state.grid)
         st.session_state["_backup_stale"] = False
 
+    st.divider()
     main_editor()
+    st.divider()
+    save_controls(db, target_coll)
 
 
 if __name__ == "__main__":
