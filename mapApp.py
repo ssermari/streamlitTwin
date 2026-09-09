@@ -128,10 +128,39 @@ def validate_grid(grid: list[list[str]], allowed: set[str]) -> list[str]:
     return problems
 
 
+def base_map_display_id(doc: dict) -> str:
+    """Human-readable identifier for a BaseMap document.
+
+    BaseMap docs may come from this app's own sample/seed format
+    ('mapId') or from the fleet-manager schema ('fmModuleMapId').
+    """
+    return str(doc.get("fmModuleMapId") or doc.get("mapId") or doc.get("_id", "unknown"))
+
+
+def base_map_option_label(doc: dict) -> str:
+    parts = [base_map_display_id(doc)]
+    if doc.get("fleetManagerId"):
+        parts.append(str(doc["fleetManagerId"]))
+    if doc.get("name"):
+        parts.append(str(doc["name"]))
+    return " — ".join(parts)
+
+
+def extract_base_map_grid(doc: dict) -> list[list] | None:
+    """BaseMap grids may be stored under 'mapGrid' (fleet-manager schema)
+    or 'grid' (this app's original sample-map schema)."""
+    grid = doc.get("mapGrid")
+    if grid is None:
+        grid = doc.get("grid")
+    return grid
+
+
 def list_base_maps(db, source_coll: str) -> list[dict]:
     try:
-        cursor = db[source_coll].find({}, {"grid": 0}).sort("mapId", 1)
-        return list(cursor)
+        cursor = db[source_coll].find({}, {"grid": 0, "mapGrid": 0})
+        docs = list(cursor)
+        docs.sort(key=base_map_display_id)
+        return docs
     except PyMongoError:
         return []
 
@@ -394,37 +423,40 @@ def sidebar_load(db, source_coll: str, target_coll: str):
 
         base_maps = list_base_maps(db, source_coll)
         if base_maps:
-            options = {
-                f'{d.get("mapId", str(d["_id"]))} — {d.get("name", "")} '
-                f'({d.get("width", "?")}x{d.get("height", "?")})': d["_id"]
-                for d in base_maps
-            }
+            options = {base_map_option_label(d): d["_id"] for d in base_maps}
             choice = st.selectbox("Available base maps", list(options.keys()))
             if st.button("Load base map", type="primary"):
                 doc = load_base_map(db, source_coll, options[choice])
                 if doc is None:
                     st.error("Could not reload that base map document.")
-                elif "grid" not in doc:
-                    st.error(
-                        "That base map document has no 'grid' field, so it can't be loaded. "
-                        "Check that it's a valid BaseMap document."
-                    )
                 else:
-                    grid = to_str_grid(doc["grid"])
-                    problems = validate_grid(grid, {"0", "1"})
-                    if problems:
-                        st.error("Base map failed validation:\n\n" + "\n".join(problems))
+                    raw_grid = extract_base_map_grid(doc)
+                    if raw_grid is None:
+                        st.error(
+                            "That base map document has no 'mapGrid' or 'grid' field, "
+                            "so it can't be loaded. Check that it's a valid BaseMap document."
+                        )
                     else:
-                        st.session_state.grid = grid
-                        st.session_state.grid_meta = {
-                            "mapName": doc.get("mapId", "warehouse-map"),
-                            "sourceMapId": doc.get("mapId", str(doc["_id"])),
-                        }
-                        st.session_state.undo_stack = []
-                        st.session_state["_backup_stale"] = True
-                        st.rerun()
+                        grid = to_str_grid(raw_grid)
+                        problems = validate_grid(grid, {"0", "1"})
+                        if problems:
+                            st.error("Base map failed validation:\n\n" + "\n".join(problems))
+                        else:
+                            map_id = base_map_display_id(doc)
+                            st.session_state.grid = grid
+                            st.session_state.grid_meta = {
+                                "mapName": map_id,
+                                "sourceMapId": map_id,
+                            }
+                            st.session_state.undo_stack = []
+                            st.session_state["_backup_stale"] = True
+                            st.rerun()
         else:
-            st.caption("No base maps found in this collection yet. Seed the sample above, or insert your own BaseMap document with fields: mapId, grid, width, height.")
+            st.caption(
+                "No base maps found in this collection yet. Seed the sample above, or insert "
+                "your own BaseMap document with a 'fmModuleMapId' (or 'mapId') and a "
+                "'mapGrid' (or 'grid') field."
+            )
 
     with st.sidebar.expander("...or continue a saved Zone Map"):
         names = list_zone_map_names(db, target_coll)
