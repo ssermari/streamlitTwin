@@ -288,18 +288,28 @@ def make_figure(grid: list[list[str]], dragmode: str = "select"):
         unselected=dict(marker=dict(opacity=0.55)),
     )
 
+    # Fixed chrome around the plot area: left/right/top/bottom margins, plus a
+    # reserved column to the right for the legend. Sizing fig_width/fig_height
+    # to exactly this chrome + the plot pixels (no extra padding) keeps the
+    # container tight to the actual map — important because the axes are
+    # locked to a 1:1 scale, so any slack we leave in one dimension just
+    # becomes dead space once that lock shrinks the plotting domain to fit.
+    MARGIN_L, MARGIN_R, MARGIN_T, MARGIN_B = 10, 10, 10, 10
+    LEGEND_RESERVE_PX = 190
+
     cell_px = max(12, min(34, int(600 / max(rows, cols, 1))))
-    fig_width = cell_px * cols + 260
-    fig_height = cell_px * rows + 90
+    fig_width = cell_px * cols + MARGIN_L + MARGIN_R + LEGEND_RESERVE_PX
+    fig_height = cell_px * rows + MARGIN_T + MARGIN_B
 
     fig.update_traces(marker=dict(size=cell_px * 0.92))
     fig.update_layout(
         width=fig_width,
         height=fig_height,
-        margin=dict(l=10, r=10, t=10, b=10),
+        margin=dict(l=MARGIN_L, r=MARGIN_R, t=MARGIN_T, b=MARGIN_B),
         dragmode=dragmode,
         legend_title_text="Type",
         plot_bgcolor="white",
+        paper_bgcolor="white",
     )
     tick_step = 1 if max(rows, cols) <= 40 else 5
     fig.update_xaxes(
