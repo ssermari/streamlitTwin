@@ -181,8 +181,25 @@ def create_center_positions(cols, rows, robot_ids=None):
     })
 
 
-# ── 1. Load the warehouse grid (same picker as mapApp.py's Zone Map loader) ───
-st.subheader("1. Load the warehouse grid")
+# ── 1. Setup: event source + warehouse grid ───────────────────────────────────
+st.subheader("1. Setup")
+
+event_colls = list_event_collections(db)
+if not event_colls:
+    st.warning(f"No collections found with the '{EVENT_COLLECTION_PREFIX}*' prefix.")
+    st.stop()
+
+default_idx = 0
+preferred = st.secrets.get("MONGO_COLLECTION")
+if preferred in event_colls:
+    default_idx = event_colls.index(preferred)
+
+selected_coll_name = st.selectbox(
+    f"Event collection ({EVENT_COLLECTION_PREFIX}*)",
+    event_colls,
+    index=default_idx,
+)
+col = db[selected_coll_name]
 
 zm_names = list_zone_map_names(db, ZONE_MAP_COLLECTION)
 if not zm_names:
@@ -247,25 +264,6 @@ st.caption(
 
 # ── Legend ─────────────────────────────────────────────────────────────────────
 st.markdown(legend_chips_html(), unsafe_allow_html=True)
-
-# ── 2. Choose the event source ─────────────────────────────────────────────────
-st.subheader("2. Choose the event source")
-event_colls = list_event_collections(db)
-if not event_colls:
-    st.warning(f"No collections found with the '{EVENT_COLLECTION_PREFIX}*' prefix.")
-    st.stop()
-
-default_idx = 0
-preferred = st.secrets.get("MONGO_COLLECTION")
-if preferred in event_colls:
-    default_idx = event_colls.index(preferred)
-
-selected_coll_name = st.selectbox(
-    f"Event collection ({EVENT_COLLECTION_PREFIX}*)",
-    event_colls,
-    index=default_idx,
-)
-col = db[selected_coll_name]
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -439,8 +437,8 @@ if hwm_doc:
 else:
     st.warning(f"No documents found in '{selected_coll_name}'.")
 
-# ── 3. Playback controls ───────────────────────────────────────────────────────
-st.subheader("3. Playback")
+# ── 2. Playback controls ───────────────────────────────────────────────────────
+st.subheader("2. Playback")
 ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([3, 3, 1, 1])
 
 with ctrl1:
