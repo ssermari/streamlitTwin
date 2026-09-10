@@ -30,9 +30,40 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-STEPS           = 8
-WH_WIDTH_UNITS  = 400
-WH_HEIGHT_UNITS = 144
+STEPS               = 8
+WH_WIDTH_UNITS      = 400
+WH_HEIGHT_UNITS     = 144
+
+# Logical grid: base unit is 2'x2', rendered at 8x8 resolution per base unit,
+# so each logical unit = (2 * 12) / 8 = 3 inches. Pallets are 52" square.
+BASE_UNIT_FT             = 2
+LOGICAL_RES_PER_BASE_UNIT = 8
+INCHES_PER_UNIT          = (BASE_UNIT_FT * 12) / LOGICAL_RES_PER_BASE_UNIT  # 3.0
+PALLET_SIZE_INCHES       = 52
+PALLET_SIZE_UNITS        = PALLET_SIZE_INCHES / INCHES_PER_UNIT  # ~17.33 units
+
+# code -> (label, color). Matches mapApp.py's PALETTE exactly, since that's
+# what the zone colors baked into wh.png (the background image) represent.
+PALETTE: dict[str, tuple[str, str]] = {
+    "S": ("Storage / Stow Areas", "#F4A300"),
+    "P": ("Pick Stations", "#2ECC71"),
+    "L": ("Load (Put) Stations", "#3498DB"),
+    "T": ("Traffic Lanes", "#9B59B6"),
+    "Q": ("Queue Areas", "#F1C40F"),
+    "1": ("Legal / Movable (Base)", "#FAFAFA"),
+    "0": ("Illegal / Not Movable", "#8B8B8B"),
+}
+
+def legend_chips_html() -> str:
+    chips = []
+    for code, (label, color) in PALETTE.items():
+        text_color = "#111" if code in ("1",) else "#fff" if code not in ("Q",) else "#111"
+        chips.append(
+            f'<span style="display:inline-flex;align-items:center;margin:2px 8px 2px 0;'
+            f'padding:2px 8px;border-radius:12px;background:{color};color:{text_color};'
+            f'font-size:12px;border:1px solid rgba(0,0,0,0.15)">{code} · {label}</span>'
+        )
+    return "<div>" + "".join(chips) + "</div>"
 
 # ── MongoDB Connection ─────────────────────────────────────────────────────────
 @st.cache_resource
@@ -58,9 +89,18 @@ def get_warehouse_image():
 
 img, img_b64          = get_warehouse_image()
 img_width, img_height = img.size
+img_aspect            = img_width / img_height
 
 scale_x = img_width  / WH_WIDTH_UNITS
 scale_y = img_height / WH_HEIGHT_UNITS
+
+# Default on-screen size of the map. The old fixed 900x350 (aspect ~2.57) was
+# both much smaller than mapApp.py's map and didn't match the background
+# image's own aspect ratio (~2.77), which stretched it slightly. Sizing off
+# img_aspect keeps it undistorted at any width; the width itself is
+# user-adjustable via the slider added below (mirrors mapApp.py's "Max map
+# display width" control).
+DEFAULT_MAP_DISPLAY_WIDTH = 1200
 
 def scale_coords(unit_x, unit_y):
     return unit_x * scale_x, unit_y * scale_y
@@ -82,7 +122,9 @@ if "playing" not in st.session_state:
 if "frame_id" not in st.session_state:
     st.session_state.frame_id = 0
 if "log_lines" not in st.session_state:
-    st.session_state.log_lines = []    
+    st.session_state.log_lines = []
+if "map_width_px" not in st.session_state:
+    st.session_state.map_width_px = DEFAULT_MAP_DISPLAY_WIDTH
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def epoch_to_str(epoch_ms):
@@ -130,8 +172,9 @@ def render_frame(placeholder, df, label=""):
         marker=dict(size=0, color="rgba(0,0,0,0)"),
     )
 
-    # Draw a rectangle for each robot
-    w, h = 90, 90
+    # Draw a rectangle for each robot, sized to the real-world 52" pallet
+    # footprint via the same unit->pixel scale used for position.
+    w, h = PALLET_SIZE_UNITS * scale_x, PALLET_SIZE_UNITS * scale_y
     for _, row in df.iterrows():
         fig.add_shape(
             type="rect",
@@ -156,9 +199,11 @@ def render_frame(placeholder, df, label=""):
         sizex=img_width, sizey=img_height,
         sizing="stretch", opacity=0.8, layer="below",
     ))
+    display_width  = st.session_state.get("map_width_px", DEFAULT_MAP_DISPLAY_WIDTH)
+    display_height = round(display_width / img_aspect)
     fig.update_layout(
-        width=900,
-        height=350,
+        width=display_width,
+        height=display_height,
         margin=dict(l=0, r=0, t=30 if label else 0, b=0),
         xaxis_visible=False, yaxis_visible=False,
         xaxis=dict(range=[0, img_width], scaleanchor=None, constrain="domain"),
@@ -218,11 +263,24 @@ with ctrl4:
     st.write("")
     stop_btn = st.button("⏹ Stop", use_container_width=True)
 
+# ── Legend ─────────────────────────────────────────────────────────────────────
+st.markdown(legend_chips_html(), unsafe_allow_html=True)
+
+st.session_state.map_width_px = st.slider(
+    "Max map display width (px)",
+    min_value=600,
+    max_value=2200,
+    value=st.session_state.map_width_px,
+    step=50,
+    help="The map's height is derived automatically from this width to match "
+         "the warehouse image's own aspect ratio, so it never looks stretched.",
+)
+
 # ── Placeholders ───────────────────────────────────────────────────────────────
 chart_placeholder  = st.empty()
-st.caption("Grids are 2'x2' base units.  Carriers are 52inches x 52inches.  Logical map resolution is 8x8 per base unit.") 
+st.caption("Grids are 2'x2' base units.  Carriers are 52inches x 52inches.  Logical map resolution is 8x8 per base unit.")
 status_placeholder = st.empty()
-log_placeholder    = st.empty()  
+log_placeholder    = st.empty()
 
 # Always render current position on load / rerun
 render_frame(chart_placeholder, st.session_state.current_pos)
