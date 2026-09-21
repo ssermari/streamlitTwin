@@ -2,8 +2,14 @@
 Warehouse Zone Map Editor
 =========================
 A Streamlit app for turning a movable/non-movable BaseMap grid into an
-annotated ZoneMap (Storage, Pick, Load, Traffic, Queue areas), backed by
-MongoDB for storage of the source BaseMap(s) and versioned ZoneMap(s).
+annotated ZoneMap (Storage, Pick, Load, Induct, Traffic, Queue areas), backed
+by MongoDB for storage of the source BaseMap(s) and versioned ZoneMap(s).
+
+Station IDs: Storage/Stow, Pick, Load (Put) and Induct areas can carry an
+optional Station ID (set in the "Station ID" field next to the Palette
+heading). When a Station ID is entered (and is not blank or 0), it is appended
+to the zone code written into the grid, so a Stow Area painted with ID 22 is
+stored as "S22" instead of "S".
 
 Run with:
     streamlit run app.py
@@ -54,12 +60,18 @@ PALETTE: dict[str, tuple[str, str]] = {
     "S": ("Storage / Stow Areas", "#F4A300"),
     "P": ("Pick Stations", "#2ECC71"),
     "L": ("Load (Put) Stations", "#3498DB"),
+    "I": ("Induct Area", "#E53935"),
     "T": ("Traffic Lanes", "#9B59B6"),
     "Q": ("Queue Areas", "#F1C40F"),
     "1": ("Legal / Movable (Base)", "#FAFAFA"),
     "0": ("Illegal / Not Movable", "#8B8B8B"),
 }
 VALID_CODES = set(PALETTE.keys())
+
+# Zone types that can carry a Station ID. When an ID is supplied, the grid
+# value becomes <code><id> (e.g. "S22") instead of just <code> ("S").
+STATION_ID_CODES = {"S", "P", "L", "I"}
+STATION_ID_MAX_LEN = 5
 
 # The sample BaseMap supplied with this app (0 = non-movable, 1 = movable).
 SAMPLE_BASE_MAP = [
@@ -183,6 +195,53 @@ def to_str_grid(raw_grid: list[list]) -> list[list[str]]:
     return [[str(v).strip().upper() for v in row] for row in raw_grid]
 
 
+# --------------------------------------------------------------------------
+# Zone code / Station ID helpers
+# --------------------------------------------------------------------------
+
+def base_code(v: str) -> str | None:
+    """Zone type for a grid value, or None if the value isn't valid.
+
+    Plain palette codes ("S", "T", "1", ...) map to themselves. For zone types
+    that support Station IDs (S, P, L, I), a value like "S22" or "P3" also
+    maps to its leading type code ("S", "P")."""
+    if v in PALETTE:
+        return v
+    if (
+        v
+        and v[0] in STATION_ID_CODES
+        and 1 < len(v) <= 1 + STATION_ID_MAX_LEN
+        and v[1:].isascii()
+        and v[1:].isalnum()
+    ):
+        return v[0]
+    return None
+
+
+def normalize_station_id(raw: str | None) -> tuple[str, str | None]:
+    """Clean up the Station ID field. Returns (station_id, error).
+
+    A blank value, or a value that is zero ("0", "00", ...), means "no
+    Station ID" and comes back as "". Otherwise the ID is upper-cased and
+    must be letters/digits only."""
+    s = (raw or "").strip().upper()
+    if not s:
+        return "", None
+    if not (s.isascii() and s.isalnum()):
+        return "", "Station ID may only contain letters and digits."
+    if s.isdigit() and int(s) == 0:
+        return "", None
+    return s, None
+
+
+def make_cell_code(zone_type: str, station_id: str) -> str:
+    """Value written into the grid: '<type><id>' when the type supports
+    Station IDs and one was supplied (e.g. 'S22'), otherwise just '<type>'."""
+    if station_id and zone_type in STATION_ID_CODES:
+        return f"{zone_type}{station_id}"
+    return zone_type
+
+
 def validate_grid(grid: list[list[str]], allowed: set[str]) -> list[str]:
     problems = []
     if not grid or not isinstance(grid, list):
@@ -192,7 +251,9 @@ def validate_grid(grid: list[list[str]], allowed: set[str]) -> list[str]:
         if len(row) != width:
             problems.append(f"Row {r} has length {len(row)}, expected {width} (ragged grid).")
         for c, v in enumerate(row):
-            if v not in allowed:
+            # Accept plain codes, and ID-suffixed codes like "S22" whose
+            # leading zone type is allowed.
+            if v not in allowed and base_code(v) not in allowed:
                 problems.append(f"Cell (row {r}, col {c}) has invalid value '{v}'.")
     if len(problems) > 8:
         problems = problems[:8] + [f"...and {len(problems) - 8} more issue(s)."]
@@ -372,12 +433,23 @@ def make_figure(
     xs, ys, types, hover = [], [], [], []
     for r in range(rows):
         for c in range(cols):
-            t = grid[r][c] if grid[r][c] in PALETTE else "0"
+            raw = grid[r][c]
+            # Colour/legend by zone type; a Station ID suffix (e.g. "S22")
+            # only shows up in the hover text.
+            if raw in PALETTE:
+                t, sid = raw, ""
+            else:
+                t = base_code(raw)
+                sid = raw[1:] if t else ""
+                t = t or "0"
             label = PALETTE[t][0]
             xs.append(c)
             ys.append(r)
             types.append(t)
-            hover.append(f"Row (Y): {r}<br>Col (X): {c}<br>Type: {t} — {label}")
+            tip = f"Row (Y): {r}<br>Col (X): {c}<br>Type: {t} — {label}"
+            if sid:
+                tip += f"<br>Station ID: {sid}"
+            hover.append(tip)
 
     df = pd.DataFrame({"x": xs, "y": ys, "type": types, "hover": hover})
 
@@ -611,7 +683,8 @@ def load_controls(db, source_coll: str, target_coll: str):
                             # Use the full palette here (not just {"0","1"}): the
                             # source collection can now be pointed at a target
                             # (ZoneMap) collection, whose grids carry the full set
-                            # of zone codes (S/P/L/T/Q) rather than just 0/1.
+                            # of zone codes (S/P/L/I/T/Q, optionally with a Station
+                            # ID suffix such as "S22") rather than just 0/1.
                             problems = validate_grid(grid, VALID_CODES)
                             if problems:
                                 st.error("Base map failed validation:\n\n" + "\n".join(problems))
@@ -792,7 +865,26 @@ def main_editor():
     grid = st.session_state.grid
     rows, cols = len(grid), len(grid[0])
 
-    st.subheader("Palette")
+    # "Palette" heading with the Station ID field sitting to its right.
+    pal_col, sid_col, _pal_spacer = st.columns([1.2, 1.4, 6], vertical_alignment="bottom")
+    with pal_col:
+        st.subheader("Palette")
+    with sid_col:
+        raw_station_id = st.text_input(
+            "Station ID",
+            max_chars=STATION_ID_MAX_LEN,
+            key="station_id_input",
+            help=(
+                "Optional. For Storage/Stow, Pick, Load (Put) and Induct areas, a "
+                "Station ID that isn't blank or 0 is appended to the zone code "
+                "written into the map — e.g. a Stow Area with ID 22 is stored as "
+                "'S22' instead of 'S'. Ignored for Traffic, Queue and base cells."
+            ),
+        )
+    station_id, station_id_error = normalize_station_id(raw_station_id)
+    if station_id_error:
+        st.error(station_id_error)
+
     codes = list(PALETTE.keys())
     apply_type = st.radio(
         "Type to paint",
@@ -801,6 +893,7 @@ def main_editor():
         horizontal=True,
         label_visibility="collapsed",
     )
+    apply_code = make_cell_code(apply_type, station_id)
     st.markdown(legend_chips_html(), unsafe_allow_html=True)
 
     st.subheader("Map")
@@ -829,8 +922,8 @@ def main_editor():
         )
     with apply_col:
         apply_clicked = st.button(
-            f"Apply '{apply_type}' to selection ({len(selected_cells)})",
-            disabled=not selected_cells,
+            f"Apply '{apply_code}' to selection ({len(selected_cells)})",
+            disabled=(not selected_cells) or bool(station_id_error),
             type="primary",
             width="stretch",
         )
@@ -879,7 +972,7 @@ def main_editor():
     if apply_clicked and selected_cells:
         push_undo()
         for r, c in selected_cells:
-            st.session_state.grid[r][c] = apply_type
+            st.session_state.grid[r][c] = apply_code
         st.rerun()
 
     if undo_clicked and st.session_state.undo_stack:
@@ -892,13 +985,13 @@ def main_editor():
         row_end = rc2.number_input("Row end (Y)", 0, rows - 1, rows - 1)
         col_start = rc3.number_input("Col start (X)", 0, cols - 1, 0)
         col_end = rc4.number_input("Col end (X)", 0, cols - 1, cols - 1)
-        if rc5.button(f"Apply '{apply_type}' to rectangle"):
+        if rc5.button(f"Apply '{apply_code}' to rectangle", disabled=bool(station_id_error)):
             push_undo()
             r0, r1 = sorted((int(row_start), int(row_end)))
             c0, c1_ = sorted((int(col_start), int(col_end)))
             for r in range(r0, r1 + 1):
                 for c in range(c0, c1_ + 1):
-                    st.session_state.grid[r][c] = apply_type
+                    st.session_state.grid[r][c] = apply_code
             st.rerun()
 
     with st.expander("Reset"):
@@ -907,10 +1000,11 @@ def main_editor():
             st.rerun()
 
     with st.expander("Cell type counts"):
+        # Counted by zone type, so "S", "S1" and "S22" all count as Storage.
         counts: dict[str, int] = {code: 0 for code in PALETTE}
         for row in grid:
             for v in row:
-                counts[v if v in counts else "0"] += 1
+                counts[base_code(v) or "0"] += 1
         counts_df = pd.DataFrame(
             [{"Code": c, "Label": PALETTE[c][0], "Count": n} for c, n in counts.items()]
         )
@@ -936,7 +1030,7 @@ def main():
 
     st.title("🏭 Warehouse Zone Map Editor")
     st.caption(
-        "Load a BaseMap, paint zones (Storage, Pick, Load, Traffic, Queue) onto it, "
+        "Load a BaseMap, paint zones (Storage, Pick, Load, Induct, Traffic, Queue) onto it, "
         "and save versioned ZoneMaps to MongoDB."
     )
 
