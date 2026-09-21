@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 import pandas as pd
 import pymongo
 from pymongo.errors import PyMongoError
+import re
 import time
 from datetime import datetime, timezone
 
@@ -29,7 +30,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-STEPS = 8
+STEPS = 8            # interpolation sub-frames per event (digitalTwin* topics)
+PATH_STEPS = 4       # interpolation sub-frames per path step (pathPlanningEvents* topics)
 
 # Logical grid convention (matches mapApp.py / the Zone Map Editor): base unit
 # is 2'x2', rendered at 8x8 resolution per base unit, so each logical grid
@@ -48,10 +50,12 @@ PALLET_SIZE_UNITS         = PALLET_SIZE_INCHES / INCHES_PER_UNIT  # ~17.33 grid 
 # writes to. Override via st.secrets["MONGO_ZONE_COLLECTION"] if needed.
 DEFAULT_ZONE_MAP_COLLECTION = "target_logical_maps"
 
-# Only collections with this prefix are offered as event sources.
-EVENT_COLLECTION_PREFIX = "digitalTwin"
+# Collections with any of these prefixes are offered as event sources.
+DIGITAL_TWIN_PREFIX       = "digitalTwin"
+PATH_PLANNING_PREFIX      = "pathPlanningEvents"
+EVENT_COLLECTION_PREFIXES = (DIGITAL_TWIN_PREFIX, PATH_PLANNING_PREFIX)
 
-DEFAULT_MAP_DISPLAY_WIDTH = 1200
+DEFAULT_MAP_DISPLAY_WIDTH = 1000
 MAP_DISPLAY_MAX_HEIGHT_PX = 700
 
 # code -> (label, color). Identical to mapApp.py's PALETTE — this is the same
@@ -61,6 +65,8 @@ PALETTE: dict[str, tuple[str, str]] = {
     "S": ("Storage / Stow Areas", "#F4A300"),
     "P": ("Pick Stations", "#2ECC71"),
     "L": ("Load (Put) Stations", "#3498DB"),
+    "I": ("Induct Area", "#E53935"),
+    "B": ("Build Area", "#8B5A2B"),
     "T": ("Traffic Lanes", "#9B59B6"),
     "Q": ("Queue Areas", "#F1C40F"),
     "1": ("Legal / Movable (Base)", "#FAFAFA"),
@@ -97,8 +103,19 @@ ZONE_MAP_COLLECTION = st.secrets.get("MONGO_ZONE_COLLECTION", DEFAULT_ZONE_MAP_C
 
 
 # ── Zone Map (grid) helpers — ported from mapApp.py ───────────────────────────
+def normalize_cell(v) -> str:
+    """Upper-case a cell value and drop any Station ID suffix: 'P1', 'S22',
+    'b7' -> 'P', 'S', 'B'. Only a zone letter followed by extra letters/digits
+    is trimmed; plain codes and the base cells '0' / '1' are left untouched
+    (so a value like '10' is not mistaken for a suffixed code)."""
+    s = str(v).strip().upper()
+    if len(s) > 1 and s[0].isalpha() and s[0] in PALETTE and s[1:].isalnum():
+        return s[0]
+    return s
+
+
 def to_str_grid(raw_grid: list[list]) -> list[list[str]]:
-    return [[str(v).strip().upper() for v in row] for row in raw_grid]
+    return [[normalize_cell(v) for v in row] for row in raw_grid]
 
 
 def validate_grid(grid: list[list[str]], allowed: set[str]) -> list[str]:
@@ -145,12 +162,44 @@ def load_zone_map(db, coll: str, doc_id) -> dict | None:
 
 def list_event_collections(db) -> list[str]:
     """Collections available as an event source: anything named
-    'digitalTwin*', so new topics show up automatically without code changes."""
+    'digitalTwin*' or 'pathPlanningEvents*', so new topics show up
+    automatically without code changes."""
     try:
         names = db.list_collection_names()
     except PyMongoError:
         return []
-    return sorted(n for n in names if n.startswith(EVENT_COLLECTION_PREFIX))
+    return sorted(n for n in names if n.startswith(EVENT_COLLECTION_PREFIXES))
+
+
+def is_path_collection(name: str) -> bool:
+    return name.startswith(PATH_PLANNING_PREFIX)
+
+
+# ── Map-version helpers ───────────────────────────────────────────────────────
+def norm_version(v):
+    """Normalise a map version so 3, 3.0, '3' and 'v3' all compare equal."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if s[:1] in ("v", "V"):
+        s = s[1:]
+    try:
+        f = float(s)
+        if f.is_integer():
+            return str(int(f))
+    except ValueError:
+        pass
+    return s
+
+
+def version_mismatch_summary(events, loaded_version):
+    """Returns (number of events whose map_version != loaded map's version,
+    sorted list of the distinct map_version values seen on those events)."""
+    want = norm_version(loaded_version)
+    bad = [e for e in events if norm_version(e.get("map_version")) != want]
+    seen = sorted({("missing" if norm_version(e.get("map_version")) is None
+                    else norm_version(e.get("map_version"))) for e in bad})
+    return len(bad), seen
 
 
 # ── Session State ──────────────────────────────────────────────────────────────
@@ -158,6 +207,7 @@ def init_state():
     defaults = {
         "grid": None,
         "grid_key": None,
+        "map_version": None,
         "current_pos": None,
         "playing": False,
         "frame_id": 0,
@@ -181,25 +231,8 @@ def create_center_positions(cols, rows, robot_ids=None):
     })
 
 
-# ── 1. Setup: event source + warehouse grid ───────────────────────────────────
+# ── 1. Setup: warehouse grid ───────────────────────────────────────────────────
 st.subheader("1. Setup")
-
-event_colls = list_event_collections(db)
-if not event_colls:
-    st.warning(f"No collections found with the '{EVENT_COLLECTION_PREFIX}*' prefix.")
-    st.stop()
-
-default_idx = 0
-preferred = st.secrets.get("MONGO_COLLECTION")
-if preferred in event_colls:
-    default_idx = event_colls.index(preferred)
-
-selected_coll_name = st.selectbox(
-    f"Event collection ({EVENT_COLLECTION_PREFIX}*)",
-    event_colls,
-    index=default_idx,
-)
-col = db[selected_coll_name]
 
 zm_names = list_zone_map_names(db, ZONE_MAP_COLLECTION)
 if not zm_names:
@@ -242,6 +275,7 @@ if load_grid_clicked and v_options:
             rows, cols = len(grid), len(grid[0])
             st.session_state.grid = grid
             st.session_state.grid_key = f'{zm_map_name}_v{doc["metadata"]["versionId"]}'
+            st.session_state.map_version = doc["metadata"]["versionId"]
             st.session_state.current_pos = create_center_positions(cols, rows)
             st.session_state.playing = False
             st.session_state.frame_id = 0
@@ -255,8 +289,10 @@ if st.session_state.grid is None:
 
 grid = st.session_state.grid
 GRID_ROWS, GRID_COLS = len(grid), len(grid[0])
+LOADED_MAP_VERSION = st.session_state.map_version
 st.caption(
-    f"Loaded **{st.session_state.grid_key}** — {GRID_COLS}×{GRID_ROWS} cells "
+    f"Loaded **{st.session_state.grid_key}** (map_version {LOADED_MAP_VERSION}) — "
+    f"{GRID_COLS}×{GRID_ROWS} cells "
     f"({GRID_COLS * INCHES_PER_UNIT / 12:.0f}' × {GRID_ROWS * INCHES_PER_UNIT / 12:.0f}' "
     f"at {INCHES_PER_UNIT:.0f}\" per cell). Carriers are {PALLET_SIZE_INCHES}\" square "
     f"(~{PALLET_SIZE_UNITS:.1f} cells)."
@@ -275,12 +311,44 @@ def epoch_to_str(epoch_ms):
         return str(epoch_ms)
 
 
-def fetch_events(col, n):
-    return list(
-        col.find({}, {"_id": 0})
-           .sort("timestamp_epoch", pymongo.DESCENDING)
-           .limit(n)
-    )
+def event_time_ms(doc) -> int:
+    """Event time in epoch ms. digitalTwin* docs carry timestamp_epoch;
+    pathPlanningEvents* docs carry created_at / updated_at (datetimes)."""
+    ts = doc.get("timestamp_epoch")
+    if ts is not None:
+        try:
+            return int(ts)
+        except (TypeError, ValueError):
+            pass
+    dt = doc.get("created_at") or doc.get("updated_at")
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+    return 0
+
+
+def sort_spec(path_mode: bool):
+    if path_mode:
+        # Newest created_at first. A planner run often writes every carrier's
+        # event with the *same* created_at (to the millisecond), so ties are
+        # broken by _id ASCENDING (insertion order): "latest 10" of a 20-carrier
+        # run is then c1..c10, not an arbitrary or reversed subset.
+        return [("created_at", pymongo.DESCENDING), ("_id", pymongo.ASCENDING)]
+    return [("timestamp_epoch", pymongo.DESCENDING)]
+
+
+def natural_key(s):
+    """Sort key so c2 comes before c10."""
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", str(s))]
+
+
+def fetch_events(col, n, path_mode=False):
+    # Path events keep their _id: it is the tie-break when several events
+    # (or several events for one carrier) share the same created_at.
+    projection = None if path_mode else {"_id": 0}
+    cursor = col.find({}, projection).sort(sort_spec(path_mode)).limit(int(n))
+    return list(cursor)
 
 
 def doc_to_df(doc):
@@ -300,6 +368,54 @@ def doc_to_df(doc):
     if rows:
         return pd.DataFrame(rows)
     return st.session_state.current_pos.copy()
+
+
+def build_path_tracks(events, loaded_version, max_moves=None):
+    """pathPlanningEvents* pipeline, in this order:
+       1. events = the N most recent docs already loaded,
+       2. keep only events whose map_version matches the loaded map,
+       3. de-duplicate by carrier_id, keeping the latest event per carrier
+          (newest created_at; ties broken by the larger _id),
+       4. turn each remaining event's 'path' ([x, y] steps) into a track,
+          keeping only the first `max_moves` moves (max_moves + 1 points,
+          i.e. the start point plus that many moves) when max_moves is set.
+    Returns (tracks, stats) where tracks = {carrier_id: [(x, y), ...]}."""
+    want = norm_version(loaded_version)
+    matching = [e for e in events if norm_version(e.get("map_version")) == want]
+
+    # Oldest -> newest, so a later event for the same carrier overwrites an
+    # earlier one and the newest survives. ObjectId hex strings sort in
+    # insertion order, which settles created_at ties.
+    latest = {}
+    for e in sorted(matching, key=lambda e: (event_time_ms(e), str(e.get("_id", "")))):
+        cid = e.get("carrier_id")
+        if cid is None:
+            continue
+        latest[cid] = e
+
+    tracks = {}
+    for cid, e in latest.items():
+        pts = []
+        for p in (e.get("path") or []):
+            if isinstance(p, (list, tuple)) and len(p) >= 2:
+                pts.append((float(p[0]), float(p[1])))
+        if not pts:
+            sp = e.get("start_position")
+            if isinstance(sp, (list, tuple)) and len(sp) >= 2:
+                pts.append((float(sp[0]), float(sp[1])))
+        if pts and max_moves is not None:
+            pts = pts[: int(max_moves) + 1]
+        if pts:
+            tracks[cid] = pts
+
+    stats = {
+        "loaded": len(events),
+        "matching": len(matching),
+        "mismatched": len(events) - len(matching),
+        "duplicates": len(matching) - len(latest),
+        "carriers": len(tracks),
+    }
+    return tracks, stats
 
 
 # ── Rendering ──────────────────────────────────────────────────────────────────
@@ -421,30 +537,115 @@ def render_frame(placeholder, df, label=""):
     )
 
 
+# ── 2. Playback: event collection + controls ─────────────────────────────────
+# "Playback" heading with the number of events to pull sitting to its right.
+pb_col, ev_col, _pb_spacer = st.columns([1.3, 1.5, 6], vertical_alignment="bottom")
+with pb_col:
+    st.subheader("2. Playback")
+with ev_col:
+    events_to_load = st.number_input(
+        "Events to load",
+        min_value=1, max_value=1000, value=10, step=1,
+        key="events_to_load",
+        help="How many of the most recent events (newest created_at first) to pull "
+             "from the selected topic. For pathPlanningEvents, duplicates are then "
+             "removed by carrier_id, keeping only the latest event per carrier.",
+    )
+events_to_load = int(events_to_load)
+
+event_colls = list_event_collections(db)
+if not event_colls:
+    st.warning(
+        "No collections found with the "
+        + " or ".join(f"'{p}*'" for p in EVENT_COLLECTION_PREFIXES)
+        + " prefix."
+    )
+    st.stop()
+
+def default_event_collection(names: list[str]) -> str:
+    """Default topic: a pathPlanningEvents* collection (the exact name
+    'pathPlanningEvents' if it exists, otherwise the first such match), then
+    the MONGO_COLLECTION secret, then whatever comes first."""
+    if PATH_PLANNING_PREFIX in names:
+        return PATH_PLANNING_PREFIX
+    path_names = [n for n in names if n.startswith(PATH_PLANNING_PREFIX)]
+    if path_names:
+        return path_names[0]
+    preferred = st.secrets.get("MONGO_COLLECTION")
+    return preferred if preferred in names else names[0]
+
+
+# The choice lives in session state under an explicit key so it survives
+# reruns (map loads, slider moves, Play/Stop). It is only (re)initialised when
+# nothing valid is stored yet.
+if st.session_state.get("event_coll_select") not in event_colls:
+    st.session_state["event_coll_select"] = default_event_collection(event_colls)
+
+selected_coll_name = st.selectbox(
+    "Event collection (" + " / ".join(f"{p}*" for p in EVENT_COLLECTION_PREFIXES) + ")",
+    event_colls,
+    key="event_coll_select",
+)
+col = db[selected_coll_name]
+IS_PATH_MODE = is_path_collection(selected_coll_name)
+st.caption(
+    "Mode: **path planning** — one event per carrier; all carriers' moves play in lock-step."
+    if IS_PATH_MODE else
+    "Mode: **digital twin** — each event is a snapshot of all carriers."
+)
+
+# Switching collections: stop any playback and drop the previous collection's
+# event log / robots so stale output from the old topic can't be mistaken for
+# the new one.
+if st.session_state.get("_active_event_coll") != selected_coll_name:
+    st.session_state["_active_event_coll"] = selected_coll_name
+    st.session_state.playing = False
+    st.session_state.log_lines = []
+    st.session_state.current_pos = create_center_positions(GRID_COLS, GRID_ROWS)
+
 # ── High Water Mark ────────────────────────────────────────────────────────────
 hwm_doc = col.find_one(
-    {}, {"timestamp_epoch": 1, "_id": 0},
-    sort=[("timestamp_epoch", pymongo.DESCENDING)]
+    {},
+    {"timestamp_epoch": 1, "created_at": 1, "updated_at": 1, "map_version": 1, "_id": 0},
+    sort=sort_spec(IS_PATH_MODE),
 )
 if hwm_doc:
-    hwm = hwm_doc["timestamp_epoch"]
+    hwm = event_time_ms(hwm_doc)
     st.markdown(
         f'<div class="hwm-box">⬆ HIGH WATER MARK &nbsp;|&nbsp; '
         f'<b>{epoch_to_str(hwm)}</b> &nbsp;·&nbsp; epoch&nbsp;{hwm} '
         f'&nbsp;·&nbsp; <span style="opacity:0.7">{selected_coll_name}</span></div>',
         unsafe_allow_html=True,
     )
+
+    # Map version check: the loaded map must match the events' map_version.
+    latest_ver = hwm_doc.get("map_version")
+    if latest_ver is None:
+        st.info(
+            f"The latest event in '{selected_coll_name}' has no map_version field, "
+            f"so it can't be confirmed against the loaded map (v{LOADED_MAP_VERSION})."
+        )
+    elif norm_version(latest_ver) != norm_version(LOADED_MAP_VERSION):
+        st.warning(
+            f"⚠ Map version mismatch: the latest event in '{selected_coll_name}' "
+            f"was produced for map_version **{latest_ver}**, but the loaded map is "
+            f"version **{LOADED_MAP_VERSION}** ({st.session_state.grid_key}). "
+            f"Robots may not line up with this map."
+        )
 else:
     st.warning(f"No documents found in '{selected_coll_name}'.")
 
-# ── 2. Playback controls ───────────────────────────────────────────────────────
-st.subheader("2. Playback")
+# ── Playback controls ──────────────────────────────────────────────────────────
 ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([3, 3, 1, 1])
 
 with ctrl1:
-    batch_limit = st.slider(
-        "Events to replay",
-        min_value=1, max_value=100, value=25, step=1,
+    moves_to_play = st.slider(
+        "Number of moves to play",
+        min_value=25, max_value=250, value=100, step=5,
+        disabled=not IS_PATH_MODE,
+        help="pathPlanningEvents only: how many moves along each carrier's path to "
+             "play back (all carriers move together, one move at a time). "
+             "Not used for digitalTwin topics, which replay whole snapshots.",
     )
 
 with ctrl2:
@@ -476,6 +677,8 @@ st.session_state.map_width_px = st.slider(
 # ── Placeholders ───────────────────────────────────────────────────────────────
 chart_placeholder  = st.empty()
 status_placeholder = st.empty()
+warn_placeholder   = st.empty()
+events_placeholder = st.empty()
 log_placeholder    = st.empty()
 
 # Always render current position on load / rerun
@@ -494,74 +697,228 @@ if st.session_state.log_lines:
         + "\n\n".join(f"- {line}" for line in st.session_state.log_lines)
     )
 
+
+def play_digital_twin(events):
+    """Original behaviour: each event is a snapshot of all carriers; play the
+    snapshots back one after another, interpolating between them."""
+    status_placeholder.info(f"Playing back {len(events)} event(s)…")
+
+    sorted_events = sorted(events, key=lambda x: x['timestamp_epoch'])
+
+    n_bad, seen = version_mismatch_summary(sorted_events, LOADED_MAP_VERSION)
+    if n_bad:
+        warn_placeholder.warning(
+            f"⚠ {n_bad} of {len(sorted_events)} event(s) have a map_version "
+            f"({', '.join(seen)}) that doesn't match the loaded map "
+            f"(version {LOADED_MAP_VERSION})."
+        )
+
+    all_robot_ids = sorted({
+        c["carrier_id"]
+        for doc in sorted_events
+        for c in doc.get("carriers", [])
+    })
+
+    st.session_state.current_pos = create_center_positions(GRID_COLS, GRID_ROWS, all_robot_ids)
+    st.session_state.log_lines = []
+
+    for i, doc in enumerate(sorted_events):
+        if not st.session_state.playing:
+            status_placeholder.warning("⏹ Playback stopped.")
+            break
+
+        incoming_df = doc_to_df(doc)
+        start_df  = st.session_state.current_pos.set_index("robot_id").sort_index()
+        target_df = incoming_df.set_index("robot_id").sort_index()
+
+        full_index = start_df.index.union(target_df.index)
+        start_df  = start_df.reindex(full_index)
+        target_df = target_df.reindex(full_index)
+
+        start_df["x"] = start_df["x"].fillna(target_df["x"])
+        start_df["y"] = start_df["y"].fillna(target_df["y"])
+        target_df["x"] = target_df["x"].fillna(start_df["x"])
+        target_df["y"] = target_df["y"].fillna(start_df["y"])
+
+        ts_label = (
+            f"Event {i+1}/{len(events)}"
+            f"  ·  {epoch_to_str(doc.get('timestamp_epoch', 0))}"
+        )
+
+        for step in range(1, STEPS + 1):
+            alpha = step / STEPS
+            frame_df = pd.DataFrame({
+                "robot_id": start_df.index,
+                "x": (start_df["x"] + (target_df["x"] - start_df["x"]) * alpha).values,
+                "y": (start_df["y"] + (target_df["y"] - start_df["y"]) * alpha).values,
+            })
+            render_frame(chart_placeholder, frame_df, label=ts_label)
+            time.sleep(frame_delay)
+
+        st.session_state.current_pos = target_df.reset_index()
+
+        robot_ids = ", ".join(str(r) for r in target_df.index.tolist())
+        st.session_state.log_lines.append(
+            f"**{ts_label}** — robots: `{robot_ids}`"
+        )
+        log_placeholder.markdown(
+            "**Event Log**\n\n"
+            + "\n\n".join(f"- {line}" for line in st.session_state.log_lines)
+        )
+
+    if st.session_state.playing:
+        st.session_state.playing = False
+        status_placeholder.success(
+            f"✅ Playback complete — {len(events)} events replayed.  "
+            f"Last: {epoch_to_str(max(event_time_ms(e) for e in events))}"
+        )
+
+
+def fmt_created(dt) -> str:
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    return "" if dt is None else str(dt)
+
+
+def path_events_table(events, loaded_version) -> pd.DataFrame:
+    """One row per event that was fetched (newest first), showing exactly what
+    the playback is about to use: created_at, map_version (and whether it
+    matches the loaded map), path length, start/end points and how many
+    distinct points the path visits."""
+    want = norm_version(loaded_version)
+    rows = []
+    for e in events:
+        pts = [tuple(p[:2]) for p in (e.get("path") or [])
+               if isinstance(p, (list, tuple)) and len(p) >= 2]
+        rows.append({
+            "carrier_id": e.get("carrier_id"),
+            "created_at": fmt_created(e.get("created_at")),
+            "map_version": str(e.get("map_version")),
+            "matches_map": norm_version(e.get("map_version")) == want,
+            "path_points": len(pts),
+            "start": f"({pts[0][0]:g}, {pts[0][1]:g})" if pts else "",
+            "end": f"({pts[-1][0]:g}, {pts[-1][1]:g})" if pts else "",
+            "distinct_points": len(set(pts)),
+        })
+    return pd.DataFrame(rows)
+
+
+def play_path_planning(events):
+    """pathPlanningEvents*: one event per carrier, each holding that carrier's
+    whole 'path'. After the version filter and per-carrier de-duplication,
+    step 0 of every carrier is shown together, then step 1 of every carrier,
+    and so on. A carrier whose path is shorter than the longest one waits at
+    its final position while the others finish."""
+    events_placeholder.dataframe(
+        path_events_table(events, LOADED_MAP_VERSION),
+        hide_index=True, use_container_width=True,
+    )
+    tracks, stats = build_path_tracks(events, LOADED_MAP_VERSION, max_moves=moves_to_play)
+
+    if stats["mismatched"]:
+        warn_placeholder.warning(
+            f"⚠ {stats['mismatched']} of {stats['loaded']} loaded event(s) have a "
+            f"map_version that doesn't match the loaded map "
+            f"(version {LOADED_MAP_VERSION}) and were skipped."
+        )
+
+    if not tracks:
+        status_placeholder.warning(
+            f"No playable events: 0 of {stats['loaded']} loaded event(s) match "
+            f"map_version {LOADED_MAP_VERSION}."
+            if stats["matching"] == 0 else
+            "The matching events contain no usable carrier_id / path data."
+        )
+        st.session_state.playing = False
+        return
+
+    carrier_ids = sorted(tracks.keys(), key=natural_key)
+    n_steps = max(len(tracks[c]) for c in carrier_ids)
+
+    status_placeholder.info(
+        f"Loaded {stats['loaded']} event(s) → {stats['matching']} match map version "
+        f"{LOADED_MAP_VERSION} → {stats['duplicates']} duplicate(s) removed → "
+        f"{stats['carriers']} carrier(s), playing {n_steps - 1} move(s) each "
+        f"(limit {moves_to_play})."
+    )
+
+    def pos_at(cid, k):
+        pts = tracks[cid]
+        return pts[min(k, len(pts) - 1)]
+
+    def frame_at(k_from, k_to, alpha):
+        xs, ys = [], []
+        for cid in carrier_ids:
+            x0, y0 = pos_at(cid, k_from)
+            x1, y1 = pos_at(cid, k_to)
+            xs.append(x0 + (x1 - x0) * alpha)
+            ys.append(y0 + (y1 - y0) * alpha)
+        return pd.DataFrame({"robot_id": carrier_ids, "x": xs, "y": ys})
+
+    st.session_state.log_lines = []
+    for cid in carrier_ids:
+        pts = tracks[cid]
+        n_distinct = len(set(pts))
+        st.session_state.log_lines.append(
+            f"**{cid}** — {len(pts) - 1} move(s), "
+            f"({pts[0][0]:g}, {pts[0][1]:g}) → ({pts[-1][0]:g}, {pts[-1][1]:g})"
+            + ("  ⚠ doesn't move in these moves" if n_distinct == 1
+               else f"  ·  {n_distinct} distinct points")
+        )
+    log_placeholder.markdown(
+        "**Event Log**\n\n"
+        + "\n\n".join(f"- {line}" for line in st.session_state.log_lines)
+    )
+
+    # Step 0: everyone at their start position.
+    start_df = frame_at(0, 0, 0.0)
+    st.session_state.current_pos = start_df
+    label = f"Step 0/{n_steps - 1}  ·  {len(carrier_ids)} carrier(s)  ·  map v{LOADED_MAP_VERSION}"
+    render_frame(chart_placeholder, start_df, label=label)
+    time.sleep(frame_delay)
+
+    # Steps 1..N: every carrier makes its k-th move at the same time.
+    stopped = False
+    for k in range(1, n_steps):
+        if not st.session_state.playing:
+            stopped = True
+            status_placeholder.warning("⏹ Playback stopped.")
+            break
+
+        label = (
+            f"Step {k}/{n_steps - 1}  ·  {len(carrier_ids)} carrier(s)"
+            f"  ·  map v{LOADED_MAP_VERSION}"
+        )
+        for sub in range(1, PATH_STEPS + 1):
+            frame_df = frame_at(k - 1, k, sub / PATH_STEPS)
+            render_frame(chart_placeholder, frame_df, label=label)
+            time.sleep(frame_delay)
+        st.session_state.current_pos = frame_at(k, k, 1.0)
+
+    if not stopped and st.session_state.playing:
+        st.session_state.playing = False
+        status_placeholder.success(
+            f"✅ Playback complete — {len(carrier_ids)} carrier(s), "
+            f"{n_steps - 1} step(s) replayed simultaneously."
+        )
+
+
 # ── playback ──────────────────────────────────────────────────────────────────
 if st.session_state.playing:
-    status_placeholder.info("Loading MongoDB events...")
-    events = fetch_events(col, batch_limit)
+    # Clear the previous run's log/warnings up front, so a run that ends early
+    # (e.g. nothing matches the map version) can't leave an old log on screen.
+    st.session_state.log_lines = []
+    log_placeholder.empty()
+    warn_placeholder.empty()
+    events_placeholder.empty()
+    status_placeholder.info(f"Loading events from '{selected_coll_name}'...")
+    events = fetch_events(col, events_to_load, path_mode=IS_PATH_MODE)
     if not events:
         status_placeholder.warning("No MongoDB events found.")
         st.session_state.playing = False
+    elif IS_PATH_MODE:
+        play_path_planning(events)
     else:
-        status_placeholder.info(f"Playing back {len(events)} event(s)…")
-
-        sorted_events = sorted(events, key=lambda x: x['timestamp_epoch'])
-
-        all_robot_ids = sorted({
-            c["carrier_id"]
-            for doc in sorted_events
-            for c in doc.get("carriers", [])
-        })
-
-        st.session_state.current_pos = create_center_positions(GRID_COLS, GRID_ROWS, all_robot_ids)
-        st.session_state.log_lines = []
-
-        for i, doc in enumerate(sorted_events):
-            if not st.session_state.playing:
-                status_placeholder.warning("⏹ Playback stopped.")
-                break
-
-            incoming_df = doc_to_df(doc)
-            start_df  = st.session_state.current_pos.set_index("robot_id").sort_index()
-            target_df = incoming_df.set_index("robot_id").sort_index()
-
-            full_index = start_df.index.union(target_df.index)
-            start_df  = start_df.reindex(full_index)
-            target_df = target_df.reindex(full_index)
-
-            start_df["x"] = start_df["x"].fillna(target_df["x"])
-            start_df["y"] = start_df["y"].fillna(target_df["y"])
-            target_df["x"] = target_df["x"].fillna(start_df["x"])
-            target_df["y"] = target_df["y"].fillna(start_df["y"])
-
-            ts_label = (
-                f"Event {i+1}/{len(events)}"
-                f"  ·  {epoch_to_str(doc.get('timestamp_epoch', 0))}"
-            )
-
-            for step in range(1, STEPS + 1):
-                alpha = step / STEPS
-                frame_df = pd.DataFrame({
-                    "robot_id": start_df.index,
-                    "x": (start_df["x"] + (target_df["x"] - start_df["x"]) * alpha).values,
-                    "y": (start_df["y"] + (target_df["y"] - start_df["y"]) * alpha).values,
-                })
-                render_frame(chart_placeholder, frame_df, label=ts_label)
-                time.sleep(frame_delay)
-
-            st.session_state.current_pos = target_df.reset_index()
-
-            robot_ids = ", ".join(str(r) for r in target_df.index.tolist())
-            st.session_state.log_lines.append(
-                f"**{ts_label}** — robots: `{robot_ids}`"
-            )
-            log_placeholder.markdown(
-                "**Event Log**\n\n"
-                + "\n\n".join(f"- {line}" for line in st.session_state.log_lines)
-            )
-
-        if st.session_state.playing:
-            st.session_state.playing = False
-            status_placeholder.success(
-                f"✅ Playback complete — {len(events)} events replayed.  "
-                f"Last: {epoch_to_str(events[-1].get('timestamp_epoch', 0))}"
-            )
+        play_digital_twin(events)

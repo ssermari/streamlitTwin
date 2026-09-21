@@ -1,7 +1,9 @@
-import copy
+import json
 
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.graph_objects as go
+import plotly.offline
 import pandas as pd
 import pymongo
 from pymongo.errors import PyMongoError
@@ -30,8 +32,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-STEPS = 8            # interpolation sub-frames per event (digitalTwin* topics)
-PATH_STEPS = 4       # interpolation sub-frames per path step (pathPlanningEvents* topics)
+# Playback now runs in the browser (see PLAYER_HTML), which interpolates
+# between keyframes on every animation frame, so there are no per-sub-frame
+# server round trips. SPEED_MS is the time one move (one keyframe -> the next)
+# takes; digitalTwin snapshots are further apart, so they get a multiplier.
+SPEED_MS = {"Slow": 600, "Normal": 300, "Fast": 120, "Turbo": 40}
+DIGITAL_TWIN_STEP_MULT = 3
+PLAYER_BAR_PX = 36
 
 # Logical grid convention (matches mapApp.py / the Zone Map Editor): base unit
 # is 2'x2', rendered at 8x8 resolution per base unit, so each logical grid
@@ -281,6 +288,7 @@ if load_grid_clicked and v_options:
             st.session_state.frame_id = 0
             st.session_state.log_lines = []
             st.session_state.pop("_base_fig_key", None)
+            st.session_state.player_payload = None
             st.rerun()
 
 if st.session_state.grid is None:
@@ -497,44 +505,161 @@ def get_base_figure():
     return st.session_state["_base_fig"], fw, fh, cell_px
 
 
-def render_frame(placeholder, df, label=""):
-    st.session_state.frame_id += 1
-    base_fig, fig_w, fig_h, cell_px = get_base_figure()
-    fig = copy.deepcopy(base_fig)
+def get_base_fig_json() -> str:
+    """The grid figure serialised once per (grid, display width) and cached."""
+    key = st.session_state.get("_base_fig_key")
+    if st.session_state.get("_base_fig_json_key") != key:
+        st.session_state["_base_fig_json"] = st.session_state["_base_fig"].to_json()
+        st.session_state["_base_fig_json_key"] = key
+    return st.session_state["_base_fig_json"]
 
-    # Pallet footprint sized in grid cells (52" / 3" per cell), overlaid
-    # directly in the grid's own x=col / y=row coordinate space.
-    w = h = PALLET_SIZE_UNITS
-    for _, row in df.iterrows():
-        fig.add_shape(
-            type="rect",
-            x0=row["x"] - w / 2, x1=row["x"] + w / 2,
-            y0=row["y"] - h / 2, y1=row["y"] + h / 2,
-            fillcolor="red",
-            line=dict(color="white", width=2),
-            xref="x", yref="y",
-        )
-        fig.add_annotation(
-            x=row["x"], y=row["y"],
-            text=str(row["robot_id"]),
-            showarrow=False,
-            font=dict(family="Arial Black", size=max(9, min(14, cell_px)), color="black"),
-            xref="x", yref="y",
-        )
 
-    if label:
-        fig.update_layout(
-            margin=dict(l=10, r=10, t=30, b=10),
-            title=dict(text=label, x=0.01, font=dict(color="#00d4ff", size=13)),
-        )
+# Self-contained page shown in an iframe. The grid is drawn once by Plotly;
+# the robots are painted on a transparent <canvas> laid over the plot, using
+# the plot's own axis ranges to convert grid cells to pixels, from a
+# requestAnimationFrame loop. Plotly is not touched per frame (redrawing its
+# shapes/annotations every frame is what made playback slow), and nothing is
+# re-sent from Streamlit per frame, so the map never blanks/strobes. The
+# overlay repaints itself if the user zooms or resets the plot.
+PLAYER_HTML = """<!doctype html>
+<html><head><meta charset="utf-8">
+<script src="__PLOTLY_SRC__"></script>
+<style>
+  html,body{margin:0;background:#fff;font-family:system-ui,Arial,sans-serif}
+  #bar{display:flex;align-items:center;gap:8px;padding:0 8px;height:30px;
+       box-sizing:border-box;background:#1a1a2e;color:#00d4ff;
+       font:13px ui-monospace,Menlo,Consolas,monospace}
+  #bar button{background:#00d4ff;color:#1a1a2e;border:0;border-radius:4px;
+       padding:2px 10px;font-size:13px;cursor:pointer}
+  #sc{flex:1;min-width:80px}
+  #lb{white-space:nowrap}
+  #wrap{position:relative}
+  #ov{position:absolute;left:0;top:0;pointer-events:none}
+</style></head><body>
+<div id="bar"><button id="pp" title="Pause / play">&#9208;</button>
+<button id="rs" title="Restart">&#8634;</button>
+<input id="sc" type="range" min="0" max="0" step="any" value="0">
+<span id="lb"></span></div>
+<div id="wrap"><div id="plot"></div><canvas id="ov"></canvas></div>
+<script>
+const FIG = __FIG_JSON__;
+const P = __PAYLOAD_JSON__;
+(function () {
+  const gd = document.getElementById('plot');
+  const pp = document.getElementById('pp'), rs = document.getElementById('rs');
+  const sc = document.getElementById('sc'), lb = document.getElementById('lb');
+  const ids = P.ids, K = P.pos, labels = P.labels;
+  const n = ids.length, nk = K.length, half = P.half;
+  sc.max = Math.max(nk - 1, 0);
+  if (nk < 2) { document.getElementById('bar').style.display = 'none'; }
 
-    placeholder.plotly_chart(
-        fig,
-        use_container_width=False,
-        theme=None,
-        config={"displayModeBar": False},
-        key=f"warehouse_map_{st.session_state.frame_id}",
+  const cv = document.getElementById('ov'), ctx = cv.getContext('2d');
+  function sizeCanvas() {
+    const W = gd._fullLayout.width, H = gd._fullLayout.height;
+    const d = window.devicePixelRatio || 1;
+    cv.width = Math.round(W * d); cv.height = Math.round(H * d);
+    cv.style.width = W + 'px'; cv.style.height = H + 'px';
+    ctx.setTransform(d, 0, 0, d, 0, 0);
+  }
+  // Paint every robot as a pallet-sized red square with its id, converting
+  // grid coordinates (x = column, y = row, row 0 at the top) to pixels with
+  // the plot's current axis ranges, so it stays correct when zoomed.
+  function paint(pos) {
+    const fl = gd._fullLayout, xa = fl.xaxis, ya = fl.yaxis;
+    const xr0 = xa.range[0], xr1 = xa.range[1], yr0 = ya.range[0], yr1 = ya.range[1];
+    const sx = xa._length / (xr1 - xr0), sy = ya._length / (yr1 - yr0);
+    const hx = half * Math.abs(sx), hy = half * Math.abs(sy);
+    ctx.clearRect(0, 0, fl.width, fl.height);
+    ctx.save();
+    ctx.beginPath(); ctx.rect(xa._offset, ya._offset, xa._length, ya._length); ctx.clip();
+    ctx.lineWidth = 2; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = '900 ' + P.font + 'px "Arial Black", Arial, sans-serif';
+    for (let i = 0; i < n; i++) {
+      const px = xa._offset + (pos[i][0] - xr0) * sx;
+      const py = ya._offset + ya._length * (yr1 - pos[i][1]) / (yr1 - yr0);
+      ctx.fillStyle = 'red'; ctx.strokeStyle = 'white';
+      ctx.fillRect(px - hx, py - hy, 2 * hx, 2 * hy);
+      ctx.strokeRect(px - hx, py - hy, 2 * hx, 2 * hy);
+      ctx.fillStyle = 'black'; ctx.fillText(ids[i], px, py);
+    }
+    ctx.restore();
+  }
+  function posAt(t) {
+    const i = Math.min(Math.floor(t), nk - 1), j = Math.min(i + 1, nk - 1), a = t - i;
+    const out = new Array(n);
+    for (let c = 0; c < n; c++) {
+      const p = K[i][c], q = K[j][c];
+      out[c] = [p[0] + (q[0] - p[0]) * a, p[1] + (q[1] - p[1]) * a];
+    }
+    return out;
+  }
+
+  let t = 0, playing = false, last = null, shown = -1;
+  function setBtn() { pp.innerHTML = playing ? '&#9208;' : '&#9654;'; }
+  function draw() {
+    paint(posAt(t));
+    const k = Math.min(Math.round(t), nk - 1);
+    if (k !== shown) { shown = k; lb.textContent = labels[k] || ''; }
+    sc.value = t;
+  }
+  function tick(ts) {
+    if (!playing) { last = null; return; }
+    if (last === null) last = ts;
+    const dt = Math.min(ts - last, 100);   // don't jump after a hidden tab
+    last = ts;
+    t += dt / P.step_ms;
+    if (t >= nk - 1) { t = nk - 1; playing = false; setBtn(); }
+    draw();
+    if (playing) requestAnimationFrame(tick);
+  }
+  function play() {
+    if (nk < 2) return;
+    if (t >= nk - 1) t = 0;
+    playing = true; last = null; setBtn(); requestAnimationFrame(tick);
+  }
+  pp.onclick = function () { if (playing) { playing = false; setBtn(); } else { play(); } };
+  rs.onclick = function () { t = 0; draw(); play(); };
+  sc.oninput = function () { playing = false; setBtn(); t = parseFloat(sc.value); draw(); };
+
+  Plotly.newPlot(gd, FIG.data, FIG.layout,
+                 {displayModeBar: false, responsive: false}).then(function () {
+    sizeCanvas(); draw(); setBtn();
+    // repaint the overlay when the user zooms / resets the plot
+    gd.on('plotly_relayout', function () { sizeCanvas(); draw(); });
+    if (P.autoplay) play();
+  });
+})();
+</script></body></html>"""
+
+
+def render_player(placeholder):
+    """Show the map + robots. With a stored run (`player_payload`) the browser
+    plays it; otherwise it just shows the robots at their current positions."""
+    _, fig_w, fig_h, cell_px = get_base_figure()
+    payload = st.session_state.get("player_payload")
+    if payload is None:
+        cp = st.session_state.current_pos
+        payload = {
+            "ids": [str(r) for r in cp["robot_id"]],
+            "pos": [[[float(x), float(y)] for x, y in zip(cp["x"], cp["y"])]],
+            "labels": [""],
+            "step_ms": SPEED_MS["Normal"],
+            "autoplay": False,
+        }
+    payload = dict(payload, half=PALLET_SIZE_UNITS / 2, font=max(9, min(14, cell_px)))
+
+    def js(s: str) -> str:
+        return s.replace("</", "<\\/")
+
+    page = (
+        PLAYER_HTML
+        .replace("__PLOTLY_SRC__",
+                 f"https://cdn.plot.ly/plotly-{plotly.offline.get_plotlyjs_version()}.min.js")
+        .replace("__FIG_JSON__", js(get_base_fig_json()))
+        .replace("__PAYLOAD_JSON__", js(json.dumps(payload)))
     )
+    with placeholder.container():
+        components.html(page, height=int(fig_h) + PLAYER_BAR_PX + 4, scrolling=True)
 
 
 # ── 2. Playback: event collection + controls ─────────────────────────────────
@@ -600,6 +725,7 @@ st.caption(
 if st.session_state.get("_active_event_coll") != selected_coll_name:
     st.session_state["_active_event_coll"] = selected_coll_name
     st.session_state.playing = False
+    st.session_state.player_payload = None
     st.session_state.log_lines = []
     st.session_state.current_pos = create_center_positions(GRID_COLS, GRID_ROWS)
 
@@ -654,7 +780,7 @@ with ctrl2:
         options=["Slow", "Normal", "Fast", "Turbo"],
         value="Normal",
     )
-    frame_delay = {"Slow": 0.2, "Normal": 0.07, "Fast": 0.02, "Turbo": 0.0}[speed_level]
+    step_ms = SPEED_MS[speed_level]
 
 with ctrl3:
     st.write("")
@@ -680,99 +806,6 @@ status_placeholder = st.empty()
 warn_placeholder   = st.empty()
 events_placeholder = st.empty()
 log_placeholder    = st.empty()
-
-# Always render current position on load / rerun
-render_frame(chart_placeholder, st.session_state.current_pos)
-
-# ── Button State ───────────────────────────────────────────────────────────────
-if play_btn:
-    st.session_state.playing = True
-if stop_btn:
-    st.session_state.playing = False
-
-# ── re-render log on every rerun so it survives Stop ─────────────────────────
-if st.session_state.log_lines:
-    log_placeholder.markdown(
-        "**Event Log**\n\n"
-        + "\n\n".join(f"- {line}" for line in st.session_state.log_lines)
-    )
-
-
-def play_digital_twin(events):
-    """Original behaviour: each event is a snapshot of all carriers; play the
-    snapshots back one after another, interpolating between them."""
-    status_placeholder.info(f"Playing back {len(events)} event(s)…")
-
-    sorted_events = sorted(events, key=lambda x: x['timestamp_epoch'])
-
-    n_bad, seen = version_mismatch_summary(sorted_events, LOADED_MAP_VERSION)
-    if n_bad:
-        warn_placeholder.warning(
-            f"⚠ {n_bad} of {len(sorted_events)} event(s) have a map_version "
-            f"({', '.join(seen)}) that doesn't match the loaded map "
-            f"(version {LOADED_MAP_VERSION})."
-        )
-
-    all_robot_ids = sorted({
-        c["carrier_id"]
-        for doc in sorted_events
-        for c in doc.get("carriers", [])
-    })
-
-    st.session_state.current_pos = create_center_positions(GRID_COLS, GRID_ROWS, all_robot_ids)
-    st.session_state.log_lines = []
-
-    for i, doc in enumerate(sorted_events):
-        if not st.session_state.playing:
-            status_placeholder.warning("⏹ Playback stopped.")
-            break
-
-        incoming_df = doc_to_df(doc)
-        start_df  = st.session_state.current_pos.set_index("robot_id").sort_index()
-        target_df = incoming_df.set_index("robot_id").sort_index()
-
-        full_index = start_df.index.union(target_df.index)
-        start_df  = start_df.reindex(full_index)
-        target_df = target_df.reindex(full_index)
-
-        start_df["x"] = start_df["x"].fillna(target_df["x"])
-        start_df["y"] = start_df["y"].fillna(target_df["y"])
-        target_df["x"] = target_df["x"].fillna(start_df["x"])
-        target_df["y"] = target_df["y"].fillna(start_df["y"])
-
-        ts_label = (
-            f"Event {i+1}/{len(events)}"
-            f"  ·  {epoch_to_str(doc.get('timestamp_epoch', 0))}"
-        )
-
-        for step in range(1, STEPS + 1):
-            alpha = step / STEPS
-            frame_df = pd.DataFrame({
-                "robot_id": start_df.index,
-                "x": (start_df["x"] + (target_df["x"] - start_df["x"]) * alpha).values,
-                "y": (start_df["y"] + (target_df["y"] - start_df["y"]) * alpha).values,
-            })
-            render_frame(chart_placeholder, frame_df, label=ts_label)
-            time.sleep(frame_delay)
-
-        st.session_state.current_pos = target_df.reset_index()
-
-        robot_ids = ", ".join(str(r) for r in target_df.index.tolist())
-        st.session_state.log_lines.append(
-            f"**{ts_label}** — robots: `{robot_ids}`"
-        )
-        log_placeholder.markdown(
-            "**Event Log**\n\n"
-            + "\n\n".join(f"- {line}" for line in st.session_state.log_lines)
-        )
-
-    if st.session_state.playing:
-        st.session_state.playing = False
-        status_placeholder.success(
-            f"✅ Playback complete — {len(events)} events replayed.  "
-            f"Last: {epoch_to_str(max(event_time_ms(e) for e in events))}"
-        )
-
 
 def fmt_created(dt) -> str:
     if isinstance(dt, datetime):
@@ -805,12 +838,82 @@ def path_events_table(events, loaded_version) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def play_path_planning(events):
+def show_log():
+    if st.session_state.log_lines:
+        log_placeholder.markdown(
+            "**Event Log**\n\n"
+            + "\n\n".join(f"- {line}" for line in st.session_state.log_lines)
+        )
+
+
+def set_final_positions(ids, last_pos):
+    st.session_state.current_pos = pd.DataFrame({
+        "robot_id": ids,
+        "x": [p[0] for p in last_pos],
+        "y": [p[1] for p in last_pos],
+    })
+
+
+def prep_digital_twin(events):
+    """digitalTwin*: each event is a snapshot of carriers. Build one keyframe
+    per event (plus a starting keyframe with every robot at the map centre);
+    carriers missing from a snapshot hold their last position, and a carrier
+    listed twice in one snapshot keeps its last entry. Returns the payload the
+    browser player animates, or None."""
+    sorted_events = sorted(events, key=lambda x: x["timestamp_epoch"])
+
+    n_bad, seen = version_mismatch_summary(sorted_events, LOADED_MAP_VERSION)
+    if n_bad:
+        warn_placeholder.warning(
+            f"⚠ {n_bad} of {len(sorted_events)} event(s) have a map_version "
+            f"({', '.join(seen)}) that doesn't match the loaded map "
+            f"(version {LOADED_MAP_VERSION})."
+        )
+
+    ids = sorted({str(c["carrier_id"]) for doc in sorted_events
+                  for c in doc.get("carriers", []) if "carrier_id" in c},
+                 key=natural_key)
+    if not ids:
+        status_placeholder.warning("The loaded events contain no carriers.")
+        return None
+
+    cur = {cid: [GRID_COLS / 2, GRID_ROWS / 2] for cid in ids}
+    snap = lambda: [list(cur[cid]) for cid in ids]
+    keyframes, labels = [snap()], ["Start"]
+    log_lines = []
+    for i, doc in enumerate(sorted_events):
+        in_doc = set()
+        for c in doc.get("carriers", []):
+            try:
+                cid = str(c["carrier_id"])
+                cur[cid] = [float(c["position"]["x"]), float(c["position"]["y"])]
+                in_doc.add(cid)
+            except Exception as e:  # noqa: BLE001
+                print(f"BAD CARRIER: {e}")
+        label = (f"Event {i + 1}/{len(sorted_events)}  ·  "
+                 f"{epoch_to_str(doc.get('timestamp_epoch', 0))}")
+        keyframes.append(snap())
+        labels.append(label)
+        log_lines.append(
+            f"**{label}** — robots: `{', '.join(sorted(in_doc, key=natural_key))}`")
+
+    st.session_state.log_lines = log_lines
+    set_final_positions(ids, keyframes[-1])
+    status_placeholder.info(
+        f"▶ Playing {len(sorted_events)} event(s) for {len(ids)} carrier(s) in the "
+        f"player below. Pause, restart or scrub with the bar above the map."
+    )
+    return {"ids": ids, "pos": keyframes, "labels": labels,
+            "step_ms": step_ms * DIGITAL_TWIN_STEP_MULT, "autoplay": True}
+
+
+def prep_path_planning(events):
     """pathPlanningEvents*: one event per carrier, each holding that carrier's
     whole 'path'. After the version filter and per-carrier de-duplication,
-    step 0 of every carrier is shown together, then step 1 of every carrier,
-    and so on. A carrier whose path is shorter than the longest one waits at
-    its final position while the others finish."""
+    keyframe k holds every carrier's position after k moves, so all carriers
+    move together (a shorter path waits at its last point). Steps where no
+    carrier moves at all are dropped. Returns the payload the browser player
+    animates, or None."""
     events_placeholder.dataframe(
         path_events_table(events, LOADED_MAP_VERSION),
         hide_index=True, use_container_width=True,
@@ -831,94 +934,78 @@ def play_path_planning(events):
             if stats["matching"] == 0 else
             "The matching events contain no usable carrier_id / path data."
         )
-        st.session_state.playing = False
-        return
+        return None
 
-    carrier_ids = sorted(tracks.keys(), key=natural_key)
-    n_steps = max(len(tracks[c]) for c in carrier_ids)
-
-    status_placeholder.info(
-        f"Loaded {stats['loaded']} event(s) → {stats['matching']} match map version "
-        f"{LOADED_MAP_VERSION} → {stats['duplicates']} duplicate(s) removed → "
-        f"{stats['carriers']} carrier(s), playing {n_steps - 1} move(s) each "
-        f"(limit {moves_to_play})."
-    )
+    ids = sorted(tracks.keys(), key=natural_key)
+    n_steps = max(len(tracks[c]) for c in ids)
 
     def pos_at(cid, k):
         pts = tracks[cid]
-        return pts[min(k, len(pts) - 1)]
+        return list(pts[min(k, len(pts) - 1)])
 
-    def frame_at(k_from, k_to, alpha):
-        xs, ys = [], []
-        for cid in carrier_ids:
-            x0, y0 = pos_at(cid, k_from)
-            x1, y1 = pos_at(cid, k_to)
-            xs.append(x0 + (x1 - x0) * alpha)
-            ys.append(y0 + (y1 - y0) * alpha)
-        return pd.DataFrame({"robot_id": carrier_ids, "x": xs, "y": ys})
+    keyframes, labels, skipped = [], [], 0
+    for k in range(n_steps):
+        frame = [pos_at(cid, k) for cid in ids]
+        if keyframes and frame == keyframes[-1]:
+            skipped += 1          # nobody moved this step: nothing to show
+            continue
+        keyframes.append(frame)
+        labels.append(f"Step {k}/{n_steps - 1}  ·  {len(ids)} carrier(s)  ·  map v{LOADED_MAP_VERSION}")
 
-    st.session_state.log_lines = []
-    for cid in carrier_ids:
+    log_lines = []
+    for cid in ids:
         pts = tracks[cid]
         n_distinct = len(set(pts))
-        st.session_state.log_lines.append(
+        log_lines.append(
             f"**{cid}** — {len(pts) - 1} move(s), "
             f"({pts[0][0]:g}, {pts[0][1]:g}) → ({pts[-1][0]:g}, {pts[-1][1]:g})"
             + ("  ⚠ doesn't move in these moves" if n_distinct == 1
                else f"  ·  {n_distinct} distinct points")
         )
-    log_placeholder.markdown(
-        "**Event Log**\n\n"
-        + "\n\n".join(f"- {line}" for line in st.session_state.log_lines)
+    st.session_state.log_lines = log_lines
+    set_final_positions(ids, keyframes[-1])
+
+    status_placeholder.info(
+        f"Loaded {stats['loaded']} event(s) → {stats['matching']} match map version "
+        f"{LOADED_MAP_VERSION} → {stats['duplicates']} duplicate(s) removed → "
+        f"{stats['carriers']} carrier(s), {n_steps - 1} move(s) each (limit "
+        f"{moves_to_play}); {skipped} idle step(s) skipped. Playing in the player "
+        f"below: pause, restart or scrub with the bar above the map."
     )
-
-    # Step 0: everyone at their start position.
-    start_df = frame_at(0, 0, 0.0)
-    st.session_state.current_pos = start_df
-    label = f"Step 0/{n_steps - 1}  ·  {len(carrier_ids)} carrier(s)  ·  map v{LOADED_MAP_VERSION}"
-    render_frame(chart_placeholder, start_df, label=label)
-    time.sleep(frame_delay)
-
-    # Steps 1..N: every carrier makes its k-th move at the same time.
-    stopped = False
-    for k in range(1, n_steps):
-        if not st.session_state.playing:
-            stopped = True
-            status_placeholder.warning("⏹ Playback stopped.")
-            break
-
-        label = (
-            f"Step {k}/{n_steps - 1}  ·  {len(carrier_ids)} carrier(s)"
-            f"  ·  map v{LOADED_MAP_VERSION}"
-        )
-        for sub in range(1, PATH_STEPS + 1):
-            frame_df = frame_at(k - 1, k, sub / PATH_STEPS)
-            render_frame(chart_placeholder, frame_df, label=label)
-            time.sleep(frame_delay)
-        st.session_state.current_pos = frame_at(k, k, 1.0)
-
-    if not stopped and st.session_state.playing:
-        st.session_state.playing = False
-        status_placeholder.success(
-            f"✅ Playback complete — {len(carrier_ids)} carrier(s), "
-            f"{n_steps - 1} step(s) replayed simultaneously."
-        )
+    return {"ids": ids, "pos": keyframes, "labels": labels,
+            "step_ms": step_ms, "autoplay": True}
 
 
-# ── playback ──────────────────────────────────────────────────────────────────
+# ── Button state ───────────────────────────────────────────────────────────────
+if play_btn:
+    st.session_state.playing = True
+if stop_btn:
+    st.session_state.playing = False
+    st.session_state.player_payload = None   # back to a static map (final positions)
+
+# ── Playback: fetch + build the run *before* drawing the map ─────────────────
 if st.session_state.playing:
-    # Clear the previous run's log/warnings up front, so a run that ends early
-    # (e.g. nothing matches the map version) can't leave an old log on screen.
+    # Playback itself now happens in the browser, so this only prepares it.
+    st.session_state.playing = False
     st.session_state.log_lines = []
     log_placeholder.empty()
     warn_placeholder.empty()
     events_placeholder.empty()
     status_placeholder.info(f"Loading events from '{selected_coll_name}'...")
     events = fetch_events(col, events_to_load, path_mode=IS_PATH_MODE)
+    payload = None
     if not events:
         status_placeholder.warning("No MongoDB events found.")
-        st.session_state.playing = False
     elif IS_PATH_MODE:
-        play_path_planning(events)
+        payload = prep_path_planning(events)
     else:
-        play_digital_twin(events)
+        payload = prep_digital_twin(events)
+    if payload is not None:
+        payload["run_id"] = time.time_ns()   # new run -> the player restarts
+        st.session_state.player_payload = payload
+
+# ── Map ───────────────────────────────────────────────────────────────────────
+render_player(chart_placeholder)
+
+# Event log survives reruns (Stop, slider moves, ...)
+show_log()
