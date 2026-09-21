@@ -670,8 +670,8 @@ def render_player(placeholder):
 
 # ── 2. Playback: event collection + controls ─────────────────────────────────
 # "Playback" heading with the number of events to pull sitting to its right.
-pb_col, ev_col, ts_col, mm_col, _pb_spacer = st.columns(
-    [1.3, 1.5, 3.0, 2.4, 1.6], vertical_alignment="bottom")
+pb_col, ev_col, mm_col, _pb_spacer = st.columns(
+    [1.3, 1.5, 2.4, 4.6], vertical_alignment="bottom")
 with pb_col:
     st.subheader("2. Playback")
 with ev_col:
@@ -684,8 +684,6 @@ with ev_col:
              "removed by carrier_id, keeping only the latest event per carrier.",
     )
 events_to_load = int(events_to_load)
-# (the created_at dropdown sits in ts_col; it is filled in further down, once
-#  the selected topic is known, because its choices come from that topic)
 with mm_col:
     allow_mismatch = st.checkbox(
         "Allow map mismatch playback",
@@ -724,11 +722,16 @@ def default_event_collection(names: list[str]) -> str:
 if st.session_state.get("event_coll_select") not in event_colls:
     st.session_state["event_coll_select"] = default_event_collection(event_colls)
 
-selected_coll_name = st.selectbox(
-    "Event collection (" + " / ".join(f"{p}*" for p in EVENT_COLLECTION_PREFIXES) + ")",
-    event_colls,
-    key="event_coll_select",
-)
+# Event collection and the created_at filter sit side by side, each about a
+# third of the page width (the created_at dropdown is filled in further down,
+# once the topic is known, because its choices come from that topic).
+coll_col, ts_col, _coll_spacer = st.columns([3.6, 3.6, 2.8])
+with coll_col:
+    selected_coll_name = st.selectbox(
+        "Event collection (" + " / ".join(f"{p}*" for p in EVENT_COLLECTION_PREFIXES) + ")",
+        event_colls,
+        key="event_coll_select",
+    )
 col = db[selected_coll_name]
 IS_PATH_MODE = is_path_collection(selected_coll_name)
 st.caption(
