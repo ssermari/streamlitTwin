@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 import pandas as pd
 import pymongo
 from pymongo.errors import PyMongoError
+import re
 import time
 from datetime import datetime, timezone
 
@@ -329,12 +330,24 @@ def event_time_ms(doc) -> int:
 
 def sort_spec(path_mode: bool):
     if path_mode:
-        return [("created_at", pymongo.DESCENDING), ("_id", pymongo.DESCENDING)]
+        # Newest created_at first. A planner run often writes every carrier's
+        # event with the *same* created_at (to the millisecond), so ties are
+        # broken by _id ASCENDING (insertion order): "latest 10" of a 20-carrier
+        # run is then c1..c10, not an arbitrary or reversed subset.
+        return [("created_at", pymongo.DESCENDING), ("_id", pymongo.ASCENDING)]
     return [("timestamp_epoch", pymongo.DESCENDING)]
 
 
+def natural_key(s):
+    """Sort key so c2 comes before c10."""
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", str(s))]
+
+
 def fetch_events(col, n, path_mode=False):
-    cursor = col.find({}, {"_id": 0}).sort(sort_spec(path_mode)).limit(n)
+    # Path events keep their _id: it is the tie-break when several events
+    # (or several events for one carrier) share the same created_at.
+    projection = None if path_mode else {"_id": 0}
+    cursor = col.find({}, projection).sort(sort_spec(path_mode)).limit(int(n))
     return list(cursor)
 
 
@@ -357,23 +370,28 @@ def doc_to_df(doc):
     return st.session_state.current_pos.copy()
 
 
-def build_path_tracks(events, loaded_version):
+def build_path_tracks(events, loaded_version, max_moves=None):
     """pathPlanningEvents* pipeline, in this order:
        1. events = the N most recent docs already loaded,
        2. keep only events whose map_version matches the loaded map,
-       3. de-duplicate by carrier_id, keeping the latest event per carrier,
-       4. turn each remaining event's 'path' ([x, y] steps) into a track.
+       3. de-duplicate by carrier_id, keeping the latest event per carrier
+          (newest created_at; ties broken by the larger _id),
+       4. turn each remaining event's 'path' ([x, y] steps) into a track,
+          keeping only the first `max_moves` moves (max_moves + 1 points,
+          i.e. the start point plus that many moves) when max_moves is set.
     Returns (tracks, stats) where tracks = {carrier_id: [(x, y), ...]}."""
     want = norm_version(loaded_version)
     matching = [e for e in events if norm_version(e.get("map_version")) == want]
 
-    # events arrive newest-first; reverse so ties resolve toward the newest
+    # Oldest -> newest, so a later event for the same carrier overwrites an
+    # earlier one and the newest survives. ObjectId hex strings sort in
+    # insertion order, which settles created_at ties.
     latest = {}
-    for e in sorted(reversed(matching), key=event_time_ms):
+    for e in sorted(matching, key=lambda e: (event_time_ms(e), str(e.get("_id", "")))):
         cid = e.get("carrier_id")
         if cid is None:
             continue
-        latest[cid] = e  # later (newer) overwrites earlier
+        latest[cid] = e
 
     tracks = {}
     for cid, e in latest.items():
@@ -385,6 +403,8 @@ def build_path_tracks(events, loaded_version):
             sp = e.get("start_position")
             if isinstance(sp, (list, tuple)) and len(sp) >= 2:
                 pts.append((float(sp[0]), float(sp[1])))
+        if pts and max_moves is not None:
+            pts = pts[: int(max_moves) + 1]
         if pts:
             tracks[cid] = pts
 
@@ -518,7 +538,20 @@ def render_frame(placeholder, df, label=""):
 
 
 # ── 2. Playback: event collection + controls ─────────────────────────────────
-st.subheader("2. Playback")
+# "Playback" heading with the number of events to pull sitting to its right.
+pb_col, ev_col, _pb_spacer = st.columns([1.3, 1.5, 6], vertical_alignment="bottom")
+with pb_col:
+    st.subheader("2. Playback")
+with ev_col:
+    events_to_load = st.number_input(
+        "Events to load",
+        min_value=1, max_value=1000, value=10, step=1,
+        key="events_to_load",
+        help="How many of the most recent events (newest created_at first) to pull "
+             "from the selected topic. For pathPlanningEvents, duplicates are then "
+             "removed by carrier_id, keeping only the latest event per carrier.",
+    )
+events_to_load = int(events_to_load)
 
 event_colls = list_event_collections(db)
 if not event_colls:
@@ -606,9 +639,13 @@ else:
 ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([3, 3, 1, 1])
 
 with ctrl1:
-    batch_limit = st.slider(
-        "Events to load & replay",
-        min_value=1, max_value=100, value=25, step=1,
+    moves_to_play = st.slider(
+        "Number of moves to play",
+        min_value=25, max_value=250, value=100, step=5,
+        disabled=not IS_PATH_MODE,
+        help="pathPlanningEvents only: how many moves along each carrier's path to "
+             "play back (all carriers move together, one move at a time). "
+             "Not used for digitalTwin topics, which replay whole snapshots.",
     )
 
 with ctrl2:
@@ -778,7 +815,7 @@ def play_path_planning(events):
         path_events_table(events, LOADED_MAP_VERSION),
         hide_index=True, use_container_width=True,
     )
-    tracks, stats = build_path_tracks(events, LOADED_MAP_VERSION)
+    tracks, stats = build_path_tracks(events, LOADED_MAP_VERSION, max_moves=moves_to_play)
 
     if stats["mismatched"]:
         warn_placeholder.warning(
@@ -797,13 +834,14 @@ def play_path_planning(events):
         st.session_state.playing = False
         return
 
-    carrier_ids = sorted(tracks.keys(), key=str)
+    carrier_ids = sorted(tracks.keys(), key=natural_key)
     n_steps = max(len(tracks[c]) for c in carrier_ids)
 
     status_placeholder.info(
         f"Loaded {stats['loaded']} event(s) → {stats['matching']} match map version "
         f"{LOADED_MAP_VERSION} → {stats['duplicates']} duplicate(s) removed → "
-        f"{stats['carriers']} carrier(s), up to {n_steps - 1} move(s)."
+        f"{stats['carriers']} carrier(s), playing {n_steps - 1} move(s) each "
+        f"(limit {moves_to_play})."
     )
 
     def pos_at(cid, k):
@@ -826,7 +864,7 @@ def play_path_planning(events):
         st.session_state.log_lines.append(
             f"**{cid}** — {len(pts) - 1} move(s), "
             f"({pts[0][0]:g}, {pts[0][1]:g}) → ({pts[-1][0]:g}, {pts[-1][1]:g})"
-            + ("  ⚠ never leaves its start point" if n_distinct == 1
+            + ("  ⚠ doesn't move in these moves" if n_distinct == 1
                else f"  ·  {n_distinct} distinct points")
         )
     log_placeholder.markdown(
@@ -876,7 +914,7 @@ if st.session_state.playing:
     warn_placeholder.empty()
     events_placeholder.empty()
     status_placeholder.info(f"Loading events from '{selected_coll_name}'...")
-    events = fetch_events(col, batch_limit, path_mode=IS_PATH_MODE)
+    events = fetch_events(col, events_to_load, path_mode=IS_PATH_MODE)
     if not events:
         status_placeholder.warning("No MongoDB events found.")
         st.session_state.playing = False
