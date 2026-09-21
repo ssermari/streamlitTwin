@@ -843,7 +843,7 @@ ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([3, 3, 1, 1])
 with ctrl1:
     moves_to_play = st.slider(
         "Number of moves to play",
-        min_value=25, max_value=250, value=100, step=5,
+        min_value=25, max_value=1000, value=100, step=5,
         disabled=not IS_PATH_MODE,
         help="pathPlanningEvents only: how many moves along each carrier's path to "
              "play back (all carriers move together, one move at a time). "
