@@ -64,6 +64,8 @@ PALETTE: dict[str, tuple[str, str]] = {
     "S": ("Storage / Stow Areas", "#F4A300"),
     "P": ("Pick Stations", "#2ECC71"),
     "L": ("Load (Put) Stations", "#3498DB"),
+    "I": ("Induct Area", "#E53935"),
+    "B": ("Build Area", "#8B5A2B"),
     "T": ("Traffic Lanes", "#9B59B6"),
     "Q": ("Queue Areas", "#F1C40F"),
     "1": ("Legal / Movable (Base)", "#FAFAFA"),
@@ -100,8 +102,19 @@ ZONE_MAP_COLLECTION = st.secrets.get("MONGO_ZONE_COLLECTION", DEFAULT_ZONE_MAP_C
 
 
 # ── Zone Map (grid) helpers — ported from mapApp.py ───────────────────────────
+def normalize_cell(v) -> str:
+    """Upper-case a cell value and drop any Station ID suffix: 'P1', 'S22',
+    'b7' -> 'P', 'S', 'B'. Only a zone letter followed by extra letters/digits
+    is trimmed; plain codes and the base cells '0' / '1' are left untouched
+    (so a value like '10' is not mistaken for a suffixed code)."""
+    s = str(v).strip().upper()
+    if len(s) > 1 and s[0].isalpha() and s[0] in PALETTE and s[1:].isalnum():
+        return s[0]
+    return s
+
+
 def to_str_grid(raw_grid: list[list]) -> list[list[str]]:
-    return [[str(v).strip().upper() for v in row] for row in raw_grid]
+    return [[normalize_cell(v) for v in row] for row in raw_grid]
 
 
 def validate_grid(grid: list[list[str]], allowed: set[str]) -> list[str]:
