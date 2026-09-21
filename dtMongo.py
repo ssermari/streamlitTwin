@@ -529,14 +529,24 @@ if not event_colls:
     )
     st.stop()
 
+def default_event_collection(names: list[str]) -> str:
+    """Default topic: a pathPlanningEvents* collection (the exact name
+    'pathPlanningEvents' if it exists, otherwise the first such match), then
+    the MONGO_COLLECTION secret, then whatever comes first."""
+    if PATH_PLANNING_PREFIX in names:
+        return PATH_PLANNING_PREFIX
+    path_names = [n for n in names if n.startswith(PATH_PLANNING_PREFIX)]
+    if path_names:
+        return path_names[0]
+    preferred = st.secrets.get("MONGO_COLLECTION")
+    return preferred if preferred in names else names[0]
+
+
 # The choice lives in session state under an explicit key so it survives
 # reruns (map loads, slider moves, Play/Stop). It is only (re)initialised when
 # nothing valid is stored yet.
 if st.session_state.get("event_coll_select") not in event_colls:
-    preferred = st.secrets.get("MONGO_COLLECTION")
-    st.session_state["event_coll_select"] = (
-        preferred if preferred in event_colls else event_colls[0]
-    )
+    st.session_state["event_coll_select"] = default_event_collection(event_colls)
 
 selected_coll_name = st.selectbox(
     "Event collection (" + " / ".join(f"{p}*" for p in EVENT_COLLECTION_PREFIXES) + ")",
@@ -631,6 +641,7 @@ st.session_state.map_width_px = st.slider(
 chart_placeholder  = st.empty()
 status_placeholder = st.empty()
 warn_placeholder   = st.empty()
+events_placeholder = st.empty()
 log_placeholder    = st.empty()
 
 # Always render current position on load / rerun
@@ -726,12 +737,47 @@ def play_digital_twin(events):
         )
 
 
+def fmt_created(dt) -> str:
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    return "" if dt is None else str(dt)
+
+
+def path_events_table(events, loaded_version) -> pd.DataFrame:
+    """One row per event that was fetched (newest first), showing exactly what
+    the playback is about to use: created_at, map_version (and whether it
+    matches the loaded map), path length, start/end points and how many
+    distinct points the path visits."""
+    want = norm_version(loaded_version)
+    rows = []
+    for e in events:
+        pts = [tuple(p[:2]) for p in (e.get("path") or [])
+               if isinstance(p, (list, tuple)) and len(p) >= 2]
+        rows.append({
+            "carrier_id": e.get("carrier_id"),
+            "created_at": fmt_created(e.get("created_at")),
+            "map_version": str(e.get("map_version")),
+            "matches_map": norm_version(e.get("map_version")) == want,
+            "path_points": len(pts),
+            "start": f"({pts[0][0]:g}, {pts[0][1]:g})" if pts else "",
+            "end": f"({pts[-1][0]:g}, {pts[-1][1]:g})" if pts else "",
+            "distinct_points": len(set(pts)),
+        })
+    return pd.DataFrame(rows)
+
+
 def play_path_planning(events):
     """pathPlanningEvents*: one event per carrier, each holding that carrier's
     whole 'path'. After the version filter and per-carrier de-duplication,
     step 0 of every carrier is shown together, then step 1 of every carrier,
     and so on. A carrier whose path is shorter than the longest one waits at
     its final position while the others finish."""
+    events_placeholder.dataframe(
+        path_events_table(events, LOADED_MAP_VERSION),
+        hide_index=True, use_container_width=True,
+    )
     tracks, stats = build_path_tracks(events, LOADED_MAP_VERSION)
 
     if stats["mismatched"]:
@@ -776,9 +822,12 @@ def play_path_planning(events):
     st.session_state.log_lines = []
     for cid in carrier_ids:
         pts = tracks[cid]
+        n_distinct = len(set(pts))
         st.session_state.log_lines.append(
             f"**{cid}** — {len(pts) - 1} move(s), "
             f"({pts[0][0]:g}, {pts[0][1]:g}) → ({pts[-1][0]:g}, {pts[-1][1]:g})"
+            + ("  ⚠ never leaves its start point" if n_distinct == 1
+               else f"  ·  {n_distinct} distinct points")
         )
     log_placeholder.markdown(
         "**Event Log**\n\n"
@@ -825,6 +874,7 @@ if st.session_state.playing:
     st.session_state.log_lines = []
     log_placeholder.empty()
     warn_placeholder.empty()
+    events_placeholder.empty()
     status_placeholder.info(f"Loading events from '{selected_coll_name}'...")
     events = fetch_events(col, batch_limit, path_mode=IS_PATH_MODE)
     if not events:
