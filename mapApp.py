@@ -2,10 +2,10 @@
 Warehouse Zone Map Editor
 =========================
 A Streamlit app for turning a movable/non-movable BaseMap grid into an
-annotated ZoneMap (Storage, Pick, Load, Induct, Traffic, Queue areas), backed
-by MongoDB for storage of the source BaseMap(s) and versioned ZoneMap(s).
+annotated ZoneMap (Storage, Pick, Load, Induct, Build, Traffic, Queue areas),
+backed by MongoDB for storage of the source BaseMap(s) and versioned ZoneMap(s).
 
-Station IDs: Storage/Stow, Pick, Load (Put) and Induct areas can carry an
+Station IDs: Storage/Stow, Pick, Load (Put), Induct and Build areas can carry an
 optional Station ID (set in the "Station ID" field next to the Palette
 heading). When a Station ID is entered (and is not blank or 0), it is appended
 to the zone code written into the grid, so a Stow Area painted with ID 22 is
@@ -61,6 +61,7 @@ PALETTE: dict[str, tuple[str, str]] = {
     "P": ("Pick Stations", "#2ECC71"),
     "L": ("Load (Put) Stations", "#3498DB"),
     "I": ("Induct Area", "#E53935"),
+    "B": ("Build Area", "#8B5A2B"),
     "T": ("Traffic Lanes", "#9B59B6"),
     "Q": ("Queue Areas", "#F1C40F"),
     "1": ("Legal / Movable (Base)", "#FAFAFA"),
@@ -70,7 +71,7 @@ VALID_CODES = set(PALETTE.keys())
 
 # Zone types that can carry a Station ID. When an ID is supplied, the grid
 # value becomes <code><id> (e.g. "S22") instead of just <code> ("S").
-STATION_ID_CODES = {"S", "P", "L", "I"}
+STATION_ID_CODES = {"S", "P", "L", "I", "B"}
 STATION_ID_MAX_LEN = 5
 
 # The sample BaseMap supplied with this app (0 = non-movable, 1 = movable).
@@ -683,7 +684,7 @@ def load_controls(db, source_coll: str, target_coll: str):
                             # Use the full palette here (not just {"0","1"}): the
                             # source collection can now be pointed at a target
                             # (ZoneMap) collection, whose grids carry the full set
-                            # of zone codes (S/P/L/I/T/Q, optionally with a Station
+                            # of zone codes (S/P/L/I/B/T/Q, optionally with a Station
                             # ID suffix such as "S22") rather than just 0/1.
                             problems = validate_grid(grid, VALID_CODES)
                             if problems:
@@ -875,7 +876,7 @@ def main_editor():
             max_chars=STATION_ID_MAX_LEN,
             key="station_id_input",
             help=(
-                "Optional. For Storage/Stow, Pick, Load (Put) and Induct areas, a "
+                "Optional. For Storage/Stow, Pick, Load (Put), Induct and Build areas, a "
                 "Station ID that isn't blank or 0 is appended to the zone code "
                 "written into the map — e.g. a Stow Area with ID 22 is stored as "
                 "'S22' instead of 'S'. Ignored for Traffic, Queue and base cells."
@@ -1030,7 +1031,7 @@ def main():
 
     st.title("🏭 Warehouse Zone Map Editor")
     st.caption(
-        "Load a BaseMap, paint zones (Storage, Pick, Load, Induct, Traffic, Queue) onto it, "
+        "Load a BaseMap, paint zones (Storage, Pick, Load, Induct, Build, Traffic, Queue) onto it, "
         "and save versioned ZoneMaps to MongoDB."
     )
 
