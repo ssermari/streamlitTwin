@@ -230,30 +230,8 @@ def create_center_positions(cols, rows, robot_ids=None):
     })
 
 
-# ── 1. Setup: event source + warehouse grid ───────────────────────────────────
+# ── 1. Setup: warehouse grid ───────────────────────────────────────────────────
 st.subheader("1. Setup")
-
-event_colls = list_event_collections(db)
-if not event_colls:
-    st.warning(
-        "No collections found with the "
-        + " or ".join(f"'{p}*'" for p in EVENT_COLLECTION_PREFIXES)
-        + " prefix."
-    )
-    st.stop()
-
-default_idx = 0
-preferred = st.secrets.get("MONGO_COLLECTION")
-if preferred in event_colls:
-    default_idx = event_colls.index(preferred)
-
-selected_coll_name = st.selectbox(
-    "Event collection (" + " / ".join(f"{p}*" for p in EVENT_COLLECTION_PREFIXES) + ")",
-    event_colls,
-    index=default_idx,
-)
-col = db[selected_coll_name]
-IS_PATH_MODE = is_path_collection(selected_coll_name)
 
 zm_names = list_zone_map_names(db, ZONE_MAP_COLLECTION)
 if not zm_names:
@@ -539,6 +517,49 @@ def render_frame(placeholder, df, label=""):
     )
 
 
+# ── 2. Playback: event collection + controls ─────────────────────────────────
+st.subheader("2. Playback")
+
+event_colls = list_event_collections(db)
+if not event_colls:
+    st.warning(
+        "No collections found with the "
+        + " or ".join(f"'{p}*'" for p in EVENT_COLLECTION_PREFIXES)
+        + " prefix."
+    )
+    st.stop()
+
+# The choice lives in session state under an explicit key so it survives
+# reruns (map loads, slider moves, Play/Stop). It is only (re)initialised when
+# nothing valid is stored yet.
+if st.session_state.get("event_coll_select") not in event_colls:
+    preferred = st.secrets.get("MONGO_COLLECTION")
+    st.session_state["event_coll_select"] = (
+        preferred if preferred in event_colls else event_colls[0]
+    )
+
+selected_coll_name = st.selectbox(
+    "Event collection (" + " / ".join(f"{p}*" for p in EVENT_COLLECTION_PREFIXES) + ")",
+    event_colls,
+    key="event_coll_select",
+)
+col = db[selected_coll_name]
+IS_PATH_MODE = is_path_collection(selected_coll_name)
+st.caption(
+    "Mode: **path planning** — one event per carrier; all carriers' moves play in lock-step."
+    if IS_PATH_MODE else
+    "Mode: **digital twin** — each event is a snapshot of all carriers."
+)
+
+# Switching collections: stop any playback and drop the previous collection's
+# event log / robots so stale output from the old topic can't be mistaken for
+# the new one.
+if st.session_state.get("_active_event_coll") != selected_coll_name:
+    st.session_state["_active_event_coll"] = selected_coll_name
+    st.session_state.playing = False
+    st.session_state.log_lines = []
+    st.session_state.current_pos = create_center_positions(GRID_COLS, GRID_ROWS)
+
 # ── High Water Mark ────────────────────────────────────────────────────────────
 hwm_doc = col.find_one(
     {},
@@ -571,8 +592,7 @@ if hwm_doc:
 else:
     st.warning(f"No documents found in '{selected_coll_name}'.")
 
-# ── 2. Playback controls ───────────────────────────────────────────────────────
-st.subheader("2. Playback")
+# ── Playback controls ──────────────────────────────────────────────────────────
 ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([3, 3, 1, 1])
 
 with ctrl1:
@@ -800,7 +820,12 @@ def play_path_planning(events):
 
 # ── playback ──────────────────────────────────────────────────────────────────
 if st.session_state.playing:
-    status_placeholder.info("Loading MongoDB events...")
+    # Clear the previous run's log/warnings up front, so a run that ends early
+    # (e.g. nothing matches the map version) can't leave an old log on screen.
+    st.session_state.log_lines = []
+    log_placeholder.empty()
+    warn_placeholder.empty()
+    status_placeholder.info(f"Loading events from '{selected_coll_name}'...")
     events = fetch_events(col, batch_limit, path_mode=IS_PATH_MODE)
     if not events:
         status_placeholder.warning("No MongoDB events found.")
