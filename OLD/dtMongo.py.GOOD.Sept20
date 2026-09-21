@@ -7,7 +7,6 @@ import plotly.offline
 import pandas as pd
 import pymongo
 from pymongo.errors import PyMongoError
-import calendar
 import re
 import time
 from datetime import datetime, timezone
@@ -333,8 +332,7 @@ def event_time_ms(doc) -> int:
     if isinstance(dt, datetime):
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        # exact integer math (no float rounding), so equal timestamps compare equal
-        return calendar.timegm(dt.utctimetuple()) * 1000 + dt.microsecond // 1000
+        return int(dt.timestamp() * 1000)
     return 0
 
 
@@ -380,11 +378,10 @@ def doc_to_df(doc):
     return st.session_state.current_pos.copy()
 
 
-def build_path_tracks(events, loaded_version, max_moves=None, allow_mismatch=False):
+def build_path_tracks(events, loaded_version, max_moves=None):
     """pathPlanningEvents* pipeline, in this order:
-       1. events = the docs already loaded (and narrowed to the chosen created_at),
-       2. keep only events whose map_version matches the loaded map (unless
-          allow_mismatch is set, in which case every event is used),
+       1. events = the N most recent docs already loaded,
+       2. keep only events whose map_version matches the loaded map,
        3. de-duplicate by carrier_id, keeping the latest event per carrier
           (newest created_at; ties broken by the larger _id),
        4. turn each remaining event's 'path' ([x, y] steps) into a track,
@@ -392,9 +389,7 @@ def build_path_tracks(events, loaded_version, max_moves=None, allow_mismatch=Fal
           i.e. the start point plus that many moves) when max_moves is set.
     Returns (tracks, stats) where tracks = {carrier_id: [(x, y), ...]}."""
     want = norm_version(loaded_version)
-    n_match = sum(1 for e in events if norm_version(e.get("map_version")) == want)
-    matching = (list(events) if allow_mismatch
-                else [e for e in events if norm_version(e.get("map_version")) == want])
+    matching = [e for e in events if norm_version(e.get("map_version")) == want]
 
     # Oldest -> newest, so a later event for the same carrier overwrites an
     # earlier one and the newest survives. ObjectId hex strings sort in
@@ -423,9 +418,8 @@ def build_path_tracks(events, loaded_version, max_moves=None, allow_mismatch=Fal
 
     stats = {
         "loaded": len(events),
-        "matching": n_match,                     # events that match the loaded map
-        "mismatched": len(events) - n_match,     # events that don't
-        "used": len(matching),                   # events actually played from
+        "matching": len(matching),
+        "mismatched": len(events) - len(matching),
         "duplicates": len(matching) - len(latest),
         "carriers": len(tracks),
     }
@@ -670,8 +664,7 @@ def render_player(placeholder):
 
 # ── 2. Playback: event collection + controls ─────────────────────────────────
 # "Playback" heading with the number of events to pull sitting to its right.
-pb_col, ev_col, ts_col, mm_col, _pb_spacer = st.columns(
-    [1.3, 1.5, 3.0, 2.4, 1.6], vertical_alignment="bottom")
+pb_col, ev_col, _pb_spacer = st.columns([1.3, 1.5, 6], vertical_alignment="bottom")
 with pb_col:
     st.subheader("2. Playback")
 with ev_col:
@@ -684,17 +677,6 @@ with ev_col:
              "removed by carrier_id, keeping only the latest event per carrier.",
     )
 events_to_load = int(events_to_load)
-# (the created_at dropdown sits in ts_col; it is filled in further down, once
-#  the selected topic is known, because its choices come from that topic)
-with mm_col:
-    allow_mismatch = st.checkbox(
-        "Allow map mismatch playback",
-        value=False,
-        key="allow_map_mismatch",
-        help="Off (default): only events whose map_version matches the loaded map "
-             "are played; any that don't are skipped. On: play every loaded event "
-             "regardless of its map_version.",
-    )
 
 event_colls = list_event_collections(db)
 if not event_colls:
@@ -745,62 +727,7 @@ if st.session_state.get("_active_event_coll") != selected_coll_name:
     st.session_state.playing = False
     st.session_state.player_payload = None
     st.session_state.log_lines = []
-    st.session_state["created_at_select"] = "ALL"
     st.session_state.current_pos = create_center_positions(GRID_COLS, GRID_ROWS)
-
-
-# ── created_at filter: choices come from the events retrieved from the topic ─
-def fmt_ms(ms: int) -> str:
-    if not ms:
-        return "(no timestamp)"
-    dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
-    return dt.strftime("%Y-%m-%d %H:%M:%S") + f".{ms % 1000:03d} UTC"
-
-
-def event_matches_map(e) -> bool:
-    return norm_version(e.get("map_version")) == norm_version(LOADED_MAP_VERSION)
-
-
-try:
-    # Same query/sort/limit as the real playback fetch, but only the fields
-    # needed here, so this stays cheap on every rerun.
-    _peek = list(
-        col.find({}, {"_id": 0, "created_at": 1, "updated_at": 1,
-                      "timestamp_epoch": 1, "map_version": 1})
-           .sort(sort_spec(IS_PATH_MODE)).limit(events_to_load)
-    )
-except PyMongoError:
-    _peek = []
-
-ts_info: dict[int, list[int]] = {}       # timestamp (ms) -> [events, events matching the map]
-for _e in _peek:
-    _row = ts_info.setdefault(event_time_ms(_e), [0, 0])
-    _row[0] += 1
-    _row[1] += int(event_matches_map(_e))
-
-ts_options = ["ALL"] + list(ts_info.keys())          # newest first, ALL on top
-if st.session_state.get("created_at_select") not in ts_options:
-    st.session_state["created_at_select"] = "ALL"
-
-
-def fmt_ts_option(o) -> str:
-    if o == "ALL":
-        return "ALL"
-    n, m = ts_info.get(o, [0, 0])
-    return f"{fmt_ms(o)}  ·  {n} event(s), {m} match map"
-
-
-with ts_col:
-    ts_choice = st.selectbox(
-        "created_at" if IS_PATH_MODE else "Event timestamp",
-        ts_options,
-        key="created_at_select",
-        format_func=fmt_ts_option,
-        help="The distinct timestamps among the events loaded from this topic "
-             "(the number set in 'Events to load'). ALL plays every loaded event; "
-             "picking one plays only the events with exactly that timestamp.",
-    )
-ts_filter = None if ts_choice == "ALL" else int(ts_choice)
 
 # ── High Water Mark ────────────────────────────────────────────────────────────
 hwm_doc = col.find_one(
@@ -936,26 +863,12 @@ def prep_digital_twin(events):
     sorted_events = sorted(events, key=lambda x: x["timestamp_epoch"])
 
     n_bad, seen = version_mismatch_summary(sorted_events, LOADED_MAP_VERSION)
-    if n_bad and allow_mismatch:
-        warn_placeholder.warning(
-            f"⚠ Playing {n_bad} of {len(sorted_events)} event(s) whose map_version "
-            f"({', '.join(seen)}) doesn't match the loaded map "
-            f"(version {LOADED_MAP_VERSION}) — allowed by 'Allow map mismatch playback'."
-        )
-    elif n_bad:
+    if n_bad:
         warn_placeholder.warning(
             f"⚠ {n_bad} of {len(sorted_events)} event(s) have a map_version "
             f"({', '.join(seen)}) that doesn't match the loaded map "
-            f"(version {LOADED_MAP_VERSION}) and were skipped. Tick 'Allow map "
-            f"mismatch playback' to include them."
+            f"(version {LOADED_MAP_VERSION})."
         )
-        sorted_events = [e for e in sorted_events if event_matches_map(e)]
-        if not sorted_events:
-            status_placeholder.warning(
-                f"No playable events: none of the loaded events match "
-                f"map_version {LOADED_MAP_VERSION}."
-            )
-            return None
 
     ids = sorted({str(c["carrier_id"]) for doc in sorted_events
                   for c in doc.get("carriers", []) if "carrier_id" in c},
@@ -1005,29 +918,21 @@ def prep_path_planning(events):
         path_events_table(events, LOADED_MAP_VERSION),
         hide_index=True, use_container_width=True,
     )
-    tracks, stats = build_path_tracks(
-        events, LOADED_MAP_VERSION, max_moves=moves_to_play, allow_mismatch=allow_mismatch)
+    tracks, stats = build_path_tracks(events, LOADED_MAP_VERSION, max_moves=moves_to_play)
 
-    if stats["mismatched"] and allow_mismatch:
-        warn_placeholder.warning(
-            f"⚠ Playing {stats['mismatched']} of {stats['loaded']} loaded event(s) whose "
-            f"map_version doesn't match the loaded map (version {LOADED_MAP_VERSION}) — "
-            f"allowed by 'Allow map mismatch playback'."
-        )
-    elif stats["mismatched"]:
+    if stats["mismatched"]:
         warn_placeholder.warning(
             f"⚠ {stats['mismatched']} of {stats['loaded']} loaded event(s) have a "
             f"map_version that doesn't match the loaded map "
-            f"(version {LOADED_MAP_VERSION}) and were skipped. Tick 'Allow map "
-            f"mismatch playback' to include them."
+            f"(version {LOADED_MAP_VERSION}) and were skipped."
         )
 
     if not tracks:
         status_placeholder.warning(
             f"No playable events: 0 of {stats['loaded']} loaded event(s) match "
             f"map_version {LOADED_MAP_VERSION}."
-            if stats["used"] == 0 else
-            "The events contain no usable carrier_id / path data."
+            if stats["matching"] == 0 else
+            "The matching events contain no usable carrier_id / path data."
         )
         return None
 
@@ -1061,10 +966,8 @@ def prep_path_planning(events):
     set_final_positions(ids, keyframes[-1])
 
     status_placeholder.info(
-        f"Loaded {stats['loaded']} event(s) → "
-        + (f"{stats['used']} used (map check off) → " if allow_mismatch else
-           f"{stats['matching']} match map version {LOADED_MAP_VERSION} → ")
-        + f"{stats['duplicates']} duplicate(s) removed → "
+        f"Loaded {stats['loaded']} event(s) → {stats['matching']} match map version "
+        f"{LOADED_MAP_VERSION} → {stats['duplicates']} duplicate(s) removed → "
         f"{stats['carriers']} carrier(s), {n_steps - 1} move(s) each (limit "
         f"{moves_to_play}); {skipped} idle step(s) skipped. Playing in the player "
         f"below: pause, restart or scrub with the bar above the map."
@@ -1090,18 +993,9 @@ if st.session_state.playing:
     events_placeholder.empty()
     status_placeholder.info(f"Loading events from '{selected_coll_name}'...")
     events = fetch_events(col, events_to_load, path_mode=IS_PATH_MODE)
-    no_events_msg = None
-    if not events:
-        no_events_msg = "No MongoDB events found."
-    elif ts_filter is not None:
-        events = [e for e in events if event_time_ms(e) == ts_filter]
-        if not events:
-            no_events_msg = (
-                f"None of the newest {events_to_load} event(s) have timestamp "
-                f"{fmt_ms(ts_filter)} any more — pick a timestamp again.")
     payload = None
     if not events:
-        status_placeholder.warning(no_events_msg)
+        status_placeholder.warning("No MongoDB events found.")
     elif IS_PATH_MODE:
         payload = prep_path_planning(events)
     else:
