@@ -14,11 +14,11 @@ from datetime import datetime, timezone
 
 # ── Page Config ────────────────────────────────────────────────────────────────
 st.set_page_config(layout="wide", page_title="Radiant Digital Twin", page_icon="📦")
-st.title("Radiant Digital Twin")
 
 st.markdown("""
 <style>
-    .block-container { padding-top: 2rem; }
+    .block-container { padding-top: 1rem; padding-bottom: 1rem; }
+    h1 { margin-top: 0; margin-bottom: 0.25rem; padding-top: 0; padding-bottom: 0; }
     .hwm-box {
         background: #1a1a2e;
         border-left: 4px solid #00d4ff;
@@ -31,6 +31,8 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+st.title("Radiant Digital Twin")
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 # Playback now runs in the browser (see PLAYER_HTML), which interpolates
@@ -310,9 +312,6 @@ st.caption(
     f"at {INCHES_PER_UNIT:.0f}\" per cell). Carriers are {PALLET_SIZE_INCHES}\" square "
     f"(~{PALLET_SIZE_UNITS:.1f} cells)."
 )
-
-# ── Legend ─────────────────────────────────────────────────────────────────────
-st.markdown(legend_chips_html(), unsafe_allow_html=True)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -882,7 +881,11 @@ st.session_state.map_width_px = st.slider(
 )
 
 # ── Placeholders ───────────────────────────────────────────────────────────────
+# The legend is declared as its own element right here, immediately after the
+# map's placeholder, so it always renders just below the map — regardless of
+# when render_player() below actually fills the map placeholder's content.
 chart_placeholder  = st.empty()
+st.markdown(legend_chips_html(), unsafe_allow_html=True)
 status_placeholder = st.empty()
 warn_placeholder   = st.empty()
 events_placeholder = st.empty()
