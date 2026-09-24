@@ -681,7 +681,7 @@ with pb_col:
 with ev_col:
     events_to_load = st.number_input(
         "Events to load",
-        min_value=1, max_value=1000, value=10, step=1,
+        min_value=1, max_value=1000, value=30, step=1,
         key="events_to_load",
         help="How many of the most recent events (newest created_at first) to pull "
              "from the selected topic. For pathPlanningEvents, duplicates are then "
@@ -847,7 +847,7 @@ ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([3, 3, 1, 1])
 with ctrl1:
     moves_to_play = st.slider(
         "Number of moves to play",
-        min_value=25, max_value=1000, value=100, step=5,
+        min_value=25, max_value=1000, value=175, step=5,
         disabled=not IS_PATH_MODE,
         help="pathPlanningEvents only: how many moves along each carrier's path to "
              "play back (all carriers move together, one move at a time). "
