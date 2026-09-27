@@ -781,7 +781,7 @@ if st.session_state.get("event_coll_select") not in event_colls:
 # Playback collection, Test ID and created_at sit side by side (the Test ID
 # and created_at dropdowns are filled in further down, once the topic is
 # known, because their choices come from that topic's events).
-coll_col, tid_col, ts_col, _coll_spacer = st.columns([1.8, 2.8, 3.6, 1.8])
+coll_col, tid_col, ts_col, _coll_spacer = st.columns([2.16, 2.16, 3.6, 1.28])
 with coll_col:
     selected_coll_name = st.selectbox(
         "Playback collection",
