@@ -174,6 +174,17 @@ def load_zone_map(db, coll: str, doc_id) -> dict | None:
         return None
 
 
+def version_ids_for_map_name(db, coll: str, map_name: str) -> set:
+    """Every versionId ever saved under this map name — used to restrict the
+    events topic query to events that belong to *this* map (any version of
+    it), not just events that happen to carry the currently loaded version."""
+    return {
+        d["metadata"]["versionId"]
+        for d in list_zone_map_versions(db, coll, map_name)
+        if "metadata" in d and "versionId" in d["metadata"]
+    }
+
+
 def list_event_collections(db) -> list[str]:
     """Collections available as an event source: anything named
     'digitalTwin*' or 'pathPlanningEvents*', so new topics show up
@@ -290,6 +301,7 @@ if load_grid_clicked and v_options:
             st.session_state.grid = grid
             st.session_state.grid_key = f'{zm_map_name}_v{doc["metadata"]["versionId"]}'
             st.session_state.map_version = doc["metadata"]["versionId"]
+            st.session_state.map_name = zm_map_name
             st.session_state.current_pos = create_center_positions(cols, rows)
             st.session_state.playing = False
             st.session_state.frame_id = 0
@@ -305,6 +317,13 @@ if st.session_state.grid is None:
 grid = st.session_state.grid
 GRID_ROWS, GRID_COLS = len(grid), len(grid[0])
 LOADED_MAP_VERSION = st.session_state.map_version
+# Falls back to the current dropdown selection only for a session predating
+# this field (map_name is otherwise always set together with the grid).
+LOADED_MAP_NAME = st.session_state.get("map_name", zm_map_name)
+# Every versionId ever saved under LOADED_MAP_NAME — the events query below
+# is restricted to these, so events belonging to some other map (by name)
+# never show up here even if a version number happened to line up.
+NAME_VERSION_IDS = version_ids_for_map_name(db, ZONE_MAP_COLLECTION, LOADED_MAP_NAME)
 st.caption(
     f"Loaded **{st.session_state.grid_key}** (map_version {LOADED_MAP_VERSION}) — "
     f"{GRID_COLS}×{GRID_ROWS} cells "
@@ -356,11 +375,41 @@ def natural_key(s):
     return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", str(s))]
 
 
-def fetch_events(col, n, path_mode=False):
+def get_test_id(doc):
+    """test-id is an optional field that may not exist on older documents yet,
+    and may be written as either 'test_id' or 'test-id' — accept both."""
+    v = doc.get("test_id")
+    return v if v is not None else doc.get("test-id")
+
+
+def group_events_by_time(events):
+    """Group events by their event time (created_at / timestamp_epoch), oldest
+    first — used to play a Test ID's created_at batches back one at a time,
+    in order, instead of merging them together."""
+    groups: dict[int, list] = {}
+    for e in events:
+        groups.setdefault(event_time_ms(e), []).append(e)
+    return sorted(groups.items())
+
+
+def map_name_filter(version_ids) -> dict:
+    """Mongo filter restricting to events tagged with one of this map name's
+    versionIds. version_ids=None means no restriction; an empty set means
+    this map name has no saved versions, so the filter matches nothing (as
+    it should — there is nothing for it to match). map_version is matched as
+    both int and str since it isn't guaranteed to be stored consistently."""
+    if version_ids is None:
+        return {}
+    values = list(version_ids) + [str(v) for v in version_ids]
+    return {"map_version": {"$in": values}}
+
+
+def fetch_events(col, n, path_mode=False, version_ids=None):
     # Path events keep their _id: it is the tie-break when several events
     # (or several events for one carrier) share the same created_at.
     projection = None if path_mode else {"_id": 0}
-    cursor = col.find({}, projection).sort(sort_spec(path_mode)).limit(int(n))
+    query = map_name_filter(version_ids)
+    cursor = col.find(query, projection).sort(sort_spec(path_mode)).limit(int(n))
     return list(cursor)
 
 
@@ -684,8 +733,11 @@ with ev_col:
         min_value=1, max_value=1000, value=30, step=1,
         key="events_to_load",
         help="How many of the most recent events (newest created_at first) to pull "
-             "from the selected topic. For pathPlanningEvents, duplicates are then "
-             "removed by carrier_id, keeping only the latest event per carrier.",
+             "from the selected topic, restricted to events tagged with a version "
+             "of the map currently loaded in Setup (by name — any saved version of "
+             "it, not just the specific one loaded). For pathPlanningEvents, "
+             "duplicates are then removed by carrier_id, keeping only the latest "
+             "event per carrier.",
     )
 events_to_load = int(events_to_load)
 with mm_col:
@@ -726,22 +778,25 @@ def default_event_collection(names: list[str]) -> str:
 if st.session_state.get("event_coll_select") not in event_colls:
     st.session_state["event_coll_select"] = default_event_collection(event_colls)
 
-# Event collection and the created_at filter sit side by side, each about a
-# third of the page width (the created_at dropdown is filled in further down,
-# once the topic is known, because its choices come from that topic).
-coll_col, ts_col, _coll_spacer = st.columns([3.6, 3.6, 2.8])
+# Playback collection, Test ID and created_at sit side by side (the Test ID
+# and created_at dropdowns are filled in further down, once the topic is
+# known, because their choices come from that topic's events).
+coll_col, tid_col, ts_col, _coll_spacer = st.columns([1.8, 2.8, 3.6, 1.8])
 with coll_col:
     selected_coll_name = st.selectbox(
-        "Event collection (" + " / ".join(f"{p}*" for p in EVENT_COLLECTION_PREFIXES) + ")",
+        "Playback collection",
         event_colls,
         key="event_coll_select",
+        help="Collections starting with "
+             + " or ".join(f"'{p}*'" for p in EVENT_COLLECTION_PREFIXES) + ".",
     )
 col = db[selected_coll_name]
 IS_PATH_MODE = is_path_collection(selected_coll_name)
 st.caption(
-    "Mode: **path planning** — one event per carrier; all carriers' moves play in lock-step."
-    if IS_PATH_MODE else
-    "Mode: **digital twin** — each event is a snapshot of all carriers."
+    ("Mode: **path planning** — one event per carrier; all carriers' moves play in lock-step."
+     if IS_PATH_MODE else
+     "Mode: **digital twin** — each event is a snapshot of all carriers.")
+    + f"  ·  Restricted to events for map **{LOADED_MAP_NAME}**."
 )
 
 # Switching collections: stop any playback and drop the previous collection's
@@ -753,6 +808,7 @@ if st.session_state.get("_active_event_coll") != selected_coll_name:
     st.session_state.player_payload = None
     st.session_state.log_lines = []
     st.session_state["created_at_select"] = "ALL"
+    st.session_state["test_id_select"] = "ALL"
     st.session_state.current_pos = create_center_positions(GRID_COLS, GRID_ROWS)
 
 
@@ -769,18 +825,62 @@ def event_matches_map(e) -> bool:
 
 
 try:
-    # Same query/sort/limit as the real playback fetch, but only the fields
-    # needed here, so this stays cheap on every rerun.
+    # Same query/sort/limit/map-name filter as the real playback fetch, but
+    # only the fields needed here, so this stays cheap on every rerun.
     _peek = list(
-        col.find({}, {"_id": 0, "created_at": 1, "updated_at": 1,
-                      "timestamp_epoch": 1, "map_version": 1})
+        col.find(map_name_filter(NAME_VERSION_IDS),
+                 {"_id": 0, "created_at": 1, "updated_at": 1, "timestamp_epoch": 1,
+                  "map_version": 1, "test_id": 1, "test-id": 1})
            .sort(sort_spec(IS_PATH_MODE)).limit(events_to_load)
     )
 except PyMongoError:
     _peek = []
 
-ts_info: dict[int, list[int]] = {}       # timestamp (ms) -> [events, events matching the map]
+# ── Test ID filter: an optional grouping field (test_id / test-id) that may
+# not be on every document yet. Choices come from the same peeked set as
+# created_at, and picking one narrows the created_at dropdown below to just
+# that test id's batches.
+tid_info: dict = {}                      # test-id value -> [events, events matching the map]
 for _e in _peek:
+    _tid = get_test_id(_e)
+    if _tid is None:
+        continue
+    _row = tid_info.setdefault(_tid, [0, 0])
+    _row[0] += 1
+    _row[1] += int(event_matches_map(_e))
+
+tid_options = ["ALL"] + sorted(tid_info.keys(), key=natural_key)
+if st.session_state.get("test_id_select") not in tid_options:
+    st.session_state["test_id_select"] = "ALL"
+
+
+def fmt_tid_option(o) -> str:
+    if o == "ALL":
+        return "ALL"
+    n, m = tid_info.get(o, [0, 0])
+    return f"{o}  ·  {n} event(s), {m} match map"
+
+
+with tid_col:
+    tid_choice = st.selectbox(
+        "Test ID",
+        tid_options,
+        key="test_id_select",
+        format_func=fmt_tid_option,
+        help="Optional grouping field on events (test_id / test-id) — appears here "
+             "once events start carrying it. ALL plays every loaded event; picking "
+             "one restricts this and the created_at filter to that test id's events. "
+             "With created_at left on ALL, that test id's created_at batches play one "
+             "after another, in created_at order — each batch's carrier moves finish "
+             "before the next batch starts — instead of being merged together.",
+    )
+tid_filter = None if tid_choice == "ALL" else tid_choice
+
+# created_at choices are narrowed to the selected test id, if any.
+_peek_for_ts = _peek if tid_filter is None else [e for e in _peek if get_test_id(e) == tid_filter]
+
+ts_info: dict[int, list[int]] = {}       # timestamp (ms) -> [events, events matching the map]
+for _e in _peek_for_ts:
     _row = ts_info.setdefault(event_time_ms(_e), [0, 0])
     _row[0] += 1
     _row[1] += int(event_matches_map(_e))
@@ -804,14 +904,17 @@ with ts_col:
         key="created_at_select",
         format_func=fmt_ts_option,
         help="The distinct timestamps among the events loaded from this topic "
-             "(the number set in 'Events to load'). ALL plays every loaded event; "
-             "picking one plays only the events with exactly that timestamp.",
+             "(the number set in 'Events to load', narrowed to the Test ID chosen "
+             "above if any). ALL plays every loaded event; picking one plays only "
+             "the events with exactly that timestamp.",
     )
 ts_filter = None if ts_choice == "ALL" else int(ts_choice)
 
 # ── High Water Mark ────────────────────────────────────────────────────────────
+# Restricted to this map name too, so the HWM reflects the same events
+# playback would actually use, not some other map's activity in this topic.
 hwm_doc = col.find_one(
-    {},
+    map_name_filter(NAME_VERSION_IDS),
     {"timestamp_epoch": 1, "created_at": 1, "updated_at": 1, "map_version": 1, "_id": 0},
     sort=sort_spec(IS_PATH_MODE),
 )
@@ -839,7 +942,10 @@ if hwm_doc:
             f"Robots may not line up with this map."
         )
 else:
-    st.warning(f"No documents found in '{selected_coll_name}'.")
+    st.warning(
+        f"No documents found in '{selected_coll_name}' for map "
+        f"'{LOADED_MAP_NAME}' (any of its {len(NAME_VERSION_IDS)} saved version(s))."
+    )
 
 # ── Playback controls ──────────────────────────────────────────────────────────
 ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([3, 3, 1, 1])
@@ -1084,6 +1190,107 @@ def prep_path_planning(events):
             "step_ms": step_ms, "autoplay": True}
 
 
+def prep_path_planning_multi_batch(events, tid_value):
+    """pathPlanningEvents*, when a specific Test ID is selected and created_at
+    is left on ALL: group the loaded events by created_at and play each
+    batch's carrier moves through to completion, in created_at order (oldest
+    batch first), before starting the next batch — instead of merging every
+    loaded event into one concurrent run the way the ALL/ALL case normally
+    does. Carriers not present in a given batch hold their last known
+    position while that batch's carriers move. Returns the payload the
+    browser player animates, or None."""
+    batches = group_events_by_time(events)  # [(ts_ms, [events]), ...] oldest first
+
+    events_placeholder.dataframe(
+        path_events_table(sorted(events, key=event_time_ms), LOADED_MAP_VERSION),
+        hide_index=True, use_container_width=True,
+    )
+
+    per_batch = []  # [(ts, tracks, stats), ...]
+    for ts, evs in batches:
+        tracks, stats = build_path_tracks(
+            evs, LOADED_MAP_VERSION, max_moves=moves_to_play, allow_mismatch=allow_mismatch)
+        per_batch.append((ts, tracks, stats))
+
+    total_loaded = sum(s["loaded"] for _, _, s in per_batch)
+    total_matching = sum(s["matching"] for _, _, s in per_batch)
+    total_mismatched = sum(s["mismatched"] for _, _, s in per_batch)
+    total_used = sum(s["used"] for _, _, s in per_batch)
+    total_dupes = sum(s["duplicates"] for _, _, s in per_batch)
+
+    if total_mismatched and allow_mismatch:
+        warn_placeholder.warning(
+            f"⚠ Playing {total_mismatched} of {total_loaded} loaded event(s) — across "
+            f"{len(per_batch)} created_at batch(es) for test id '{tid_value}' — whose "
+            f"map_version doesn't match the loaded map (version {LOADED_MAP_VERSION}) — "
+            f"allowed by 'Allow map mismatch playback'."
+        )
+    elif total_mismatched:
+        warn_placeholder.warning(
+            f"⚠ {total_mismatched} of {total_loaded} loaded event(s) — across "
+            f"{len(per_batch)} created_at batch(es) for test id '{tid_value}' — have a "
+            f"map_version that doesn't match the loaded map (version {LOADED_MAP_VERSION}) "
+            f"and were skipped. Tick 'Allow map mismatch playback' to include them."
+        )
+
+    active_batches = [(ts, tr, s) for ts, tr, s in per_batch if tr]
+    if not active_batches:
+        status_placeholder.warning(
+            f"No playable events for test id '{tid_value}': 0 of {total_loaded} loaded "
+            f"event(s) match map_version {LOADED_MAP_VERSION}."
+            if total_used == 0 else
+            "The events contain no usable carrier_id / path data."
+        )
+        return None
+
+    ids = sorted({cid for _, tr, _ in active_batches for cid in tr}, key=natural_key)
+    cur = {cid: [GRID_COLS / 2, GRID_ROWS / 2] for cid in ids}
+
+    keyframes, labels, skipped = [], [], 0
+    total_b = len(active_batches)
+    log_lines = [f"**Test ID `{tid_value}`** — {total_b} created_at batch(es), "
+                 f"played in order:"]
+    for bi, (ts, tracks, stats) in enumerate(active_batches, start=1):
+        n_steps = max(len(p) for p in tracks.values())
+        batch_ids = sorted(tracks.keys(), key=natural_key)
+        for k in range(n_steps):
+            for cid in batch_ids:
+                pts = tracks[cid]
+                cur[cid] = list(pts[min(k, len(pts) - 1)])
+            frame = [list(cur[cid]) for cid in ids]
+            if keyframes and frame == keyframes[-1]:
+                skipped += 1          # nobody moved this step: nothing to show
+                continue
+            keyframes.append(frame)
+            labels.append(
+                f"Batch {bi}/{total_b}  ·  {fmt_ms(ts)}  ·  step {k}/{n_steps - 1}  ·  "
+                f"{len(batch_ids)} carrier(s)"
+            )
+        log_lines.append(
+            f"Batch {bi}/{total_b} — {fmt_ms(ts)} — {n_steps - 1} move(s) — carriers: "
+            f"`{', '.join(batch_ids)}`"
+        )
+
+    st.session_state.log_lines = log_lines
+    set_final_positions(ids, keyframes[-1])
+
+    skipped_batches = len(per_batch) - total_b
+    status_placeholder.info(
+        f"Loaded {total_loaded} event(s) for test id '{tid_value}' across "
+        f"{len(per_batch)} created_at batch(es) → "
+        + (f"{total_used} used (map check off) → " if allow_mismatch else
+           f"{total_matching} match map version {LOADED_MAP_VERSION} → ")
+        + f"{total_dupes} duplicate(s) removed → {total_b} batch(es) played "
+        + (f"({skipped_batches} batch(es) had no playable events and were skipped) → "
+           if skipped_batches else "→ ")
+        + f"{len(ids)} carrier(s) total; {skipped} idle step(s) skipped. Batches play "
+        f"one after another, in created_at order. Playing in the player below: pause, "
+        f"restart or scrub with the bar above the map."
+    )
+    return {"ids": ids, "pos": keyframes, "labels": labels,
+            "step_ms": step_ms, "autoplay": True}
+
+
 # ── Button state ───────────────────────────────────────────────────────────────
 if play_btn:
     st.session_state.playing = True
@@ -1099,12 +1306,23 @@ if st.session_state.playing:
     log_placeholder.empty()
     warn_placeholder.empty()
     events_placeholder.empty()
-    status_placeholder.info(f"Loading events from '{selected_coll_name}'...")
-    events = fetch_events(col, events_to_load, path_mode=IS_PATH_MODE)
+    status_placeholder.info(
+        f"Loading events from '{selected_coll_name}' for map '{LOADED_MAP_NAME}'..."
+    )
+    events = fetch_events(col, events_to_load, path_mode=IS_PATH_MODE,
+                          version_ids=NAME_VERSION_IDS)
     no_events_msg = None
     if not events:
-        no_events_msg = "No MongoDB events found."
-    elif ts_filter is not None:
+        no_events_msg = (
+            f"No events found in '{selected_coll_name}' for map '{LOADED_MAP_NAME}'."
+        )
+    elif tid_filter is not None:
+        events = [e for e in events if get_test_id(e) == tid_filter]
+        if not events:
+            no_events_msg = (
+                f"None of the newest {events_to_load} event(s) are tagged with test "
+                f"id '{tid_filter}' any more — pick a test id again.")
+    if events and ts_filter is not None:
         events = [e for e in events if event_time_ms(e) == ts_filter]
         if not events:
             no_events_msg = (
@@ -1114,7 +1332,13 @@ if st.session_state.playing:
     if not events:
         status_placeholder.warning(no_events_msg)
     elif IS_PATH_MODE:
-        payload = prep_path_planning(events)
+        # A specific Test ID with created_at left on ALL plays that test id's
+        # created_at batches one after another, in order; every other
+        # combination uses the normal single merged-run playback.
+        if tid_filter is not None and ts_filter is None:
+            payload = prep_path_planning_multi_batch(events, tid_filter)
+        else:
+            payload = prep_path_planning(events)
     else:
         payload = prep_digital_twin(events)
     if payload is not None:
