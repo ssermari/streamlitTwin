@@ -1046,11 +1046,10 @@ def set_final_positions(ids, last_pos):
 
 def prep_digital_twin(events):
     """digitalTwin*: each event is a snapshot of carriers. Build one keyframe
-    per event, plus a starting keyframe in which every robot sits at its first
-    move location (the first position it has in the loaded snapshots) rather
-    than at the map centre. Carriers missing from a snapshot hold their last
-    position, and a carrier listed twice in one snapshot keeps its last entry.
-    Returns the payload the browser player animates, or None."""
+    per event (plus a starting keyframe with every robot at the map centre);
+    carriers missing from a snapshot hold their last position, and a carrier
+    listed twice in one snapshot keeps its last entry. Returns the payload the
+    browser player animates, or None."""
     sorted_events = sorted(events, key=lambda x: x["timestamp_epoch"])
 
     n_bad, seen = version_mismatch_summary(sorted_events, LOADED_MAP_VERSION)
@@ -1082,20 +1081,7 @@ def prep_digital_twin(events):
         status_placeholder.warning("The loaded events contain no carriers.")
         return None
 
-    # Start every carrier at its first move location: the first position it
-    # has in the (time-ordered) snapshots. Only a carrier with no usable
-    # position anywhere falls back to the map centre.
-    cur = {}
-    for doc in sorted_events:
-        for c in doc.get("carriers", []):
-            try:
-                cid = str(c["carrier_id"])
-                if cid not in cur:
-                    cur[cid] = [float(c["position"]["x"]), float(c["position"]["y"])]
-            except Exception:  # noqa: BLE001 — bad entries are reported below
-                pass
-    for cid in ids:
-        cur.setdefault(cid, [GRID_COLS / 2, GRID_ROWS / 2])
+    cur = {cid: [GRID_COLS / 2, GRID_ROWS / 2] for cid in ids}
     snap = lambda: [list(cur[cid]) for cid in ids]
     keyframes, labels = [snap()], ["Start"]
     log_lines = []
@@ -1210,12 +1196,9 @@ def prep_path_planning_multi_batch(events, tid_value):
     batch's carrier moves through to completion, in created_at order (oldest
     batch first), before starting the next batch — instead of merging every
     loaded event into one concurrent run the way the ALL/ALL case normally
-    does. Every carrier starts at its first move location (the first point
-    of its path in the first batch it appears in), so a carrier that only
-    moves in a later batch waits there, not at the map centre. Carriers not
-    present in a given batch hold their last known position while that
-    batch's carriers move. Returns the payload the browser player animates,
-    or None."""
+    does. Carriers not present in a given batch hold their last known
+    position while that batch's carriers move. Returns the payload the
+    browser player animates, or None."""
     batches = group_events_by_time(events)  # [(ts_ms, [events]), ...] oldest first
 
     events_placeholder.dataframe(
@@ -1261,13 +1244,7 @@ def prep_path_planning_multi_batch(events, tid_value):
         return None
 
     ids = sorted({cid for _, tr, _ in active_batches for cid in tr}, key=natural_key)
-    # Start every carrier at its first move location: the first point of its
-    # path in the earliest batch that contains it.
-    cur = {}
-    for _, tr, _ in active_batches:
-        for cid, pts in tr.items():
-            if cid not in cur:
-                cur[cid] = list(pts[0])
+    cur = {cid: [GRID_COLS / 2, GRID_ROWS / 2] for cid in ids}
 
     keyframes, labels, skipped = [], [], 0
     total_b = len(active_batches)
