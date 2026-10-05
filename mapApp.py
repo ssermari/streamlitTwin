@@ -532,7 +532,7 @@ def make_figure(
         # Same large, dark tooltip for every zone type (instead of a box in
         # each trace's own colour, which is hard to read on the pale ones).
         hoverlabel=dict(
-            bgcolor="rgba(26,26,46,0.95)",
+            bgcolor="#1a1a2e",  # fully opaque, so the map never shows through the text
             bordercolor="#00d4ff",
             font=dict(size=HOVER_FONT_PX, color="white", family="Arial, sans-serif"),
             align="left",
@@ -1037,11 +1037,13 @@ def main_editor():
     )
     # Shift the map's hover tooltip up and to the right of the mouse so it
     # doesn't cover the cell being selected. Plotly has no setting for this,
-    # so it's done with CSS: the `translate` property adds to the position
-    # Plotly gives the tooltip instead of replacing it.
+    # so it's done with CSS on the whole hover layer (the group holding the
+    # tooltip's box AND its text), so the box and text always move together.
+    # The `translate` property adds to the position Plotly gives the tooltip
+    # instead of replacing it.
     st.markdown(
         "<style>"
-        ".js-plotly-plot .hoverlayer .hovertext {"
+        ".js-plotly-plot .main-svg .hoverlayer {"
         f"translate: {HOVER_OFFSET_X_PX}px -{HOVER_OFFSET_Y_PX}px;"
         "pointer-events: none;"
         "}"
