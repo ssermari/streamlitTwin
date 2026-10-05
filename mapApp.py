@@ -86,10 +86,10 @@ TRAFFIC_CODE = "T"
 TRAFFIC_SUFFIXES = ("<", ">", "^", "v")
 
 # Map hover tooltip: a large, high-contrast box so the cell value is easy to
-# read. The value itself is shown at HOVER_VALUE_FONT_PX, the other lines at
-# HOVER_FONT_PX.
-HOVER_FONT_PX = 16
-HOVER_VALUE_FONT_PX = 24
+# read. Every line uses this one size (the cell value is bold): Plotly sizes
+# the tooltip's box from a single font size, so mixing sizes makes the text
+# spill out of the box.
+HOVER_FONT_PX = 18
 # How far the tooltip is pushed away from the mouse, so it doesn't cover the
 # cell being picked: HOVER_OFFSET_X_PX to the right, HOVER_OFFSET_Y_PX up.
 HOVER_OFFSET_X_PX = 50
@@ -504,7 +504,7 @@ def make_figure(
             # or direction, and row/col. Escaped so "<" / ">" aren't read as
             # HTML tags.
             tip = (
-                f"<span style='font-size:{HOVER_VALUE_FONT_PX}px'><b>{html.escape(raw)}</b></span>"
+                f"<b>{html.escape(raw)}</b>"
                 f"<br>Type: {t} — {label}"
             )
             if sid:
