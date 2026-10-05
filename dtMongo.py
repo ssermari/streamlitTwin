@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import json
 
 import streamlit as st
@@ -14,6 +16,56 @@ from datetime import datetime, timezone
 
 # ── Page Config ────────────────────────────────────────────────────────────────
 st.set_page_config(layout="wide", page_title="Radiant Digital Twin", page_icon="📦")
+
+# ── Password gate ──────────────────────────────────────────────────────────────
+# Same scheme as mapApp.py. Only a salted SHA-256 hash of the password is
+# stored below — never the plaintext — so reading this source file does not
+# reveal the password. To change the password: pick a new one, compute
+#   hashlib.sha256((AUTH_SALT + "<new-password>").encode("utf-8")).hexdigest()
+# and paste the result into AUTH_PASSWORD_HASH. There is no way to recover
+# the plaintext password from the hash.
+AUTH_SALT = "dt-mongo-twin-v1:"
+AUTH_PASSWORD_HASH = "bd06bd8268d86a30fef668a60b8f8c7700a044869775a662004ac515ea990818"
+
+
+def _check_password(candidate: str) -> bool:
+    digest = hashlib.sha256((AUTH_SALT + candidate).encode("utf-8")).hexdigest()
+    return hmac.compare_digest(digest, AUTH_PASSWORD_HASH)
+
+
+def password_gate() -> None:
+    """Block the rest of the app until the correct password is entered.
+
+    Renders nothing but a password prompt (and, after a wrong attempt, a
+    "bad password" message) until authenticated for this browser session,
+    then lets the script continue. Calls st.stop() so nothing else — not
+    even the MongoDB connection — runs before authentication succeeds.
+    """
+    if st.session_state.get("_authenticated"):
+        return
+
+    st.session_state.setdefault("_auth_failed", False)
+
+    if st.session_state["_auth_failed"]:
+        st.write("bad password")
+
+    with st.form("_auth_form", clear_on_submit=True):
+        pw = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="Password")
+        submitted = st.form_submit_button("Enter")
+
+    if submitted:
+        if _check_password(pw):
+            st.session_state["_authenticated"] = True
+            st.session_state["_auth_failed"] = False
+            st.rerun()
+        else:
+            st.session_state["_auth_failed"] = True
+            st.rerun()
+
+    st.stop()
+
+
+password_gate()  # blocks (st.stop()) until the correct password is entered
 
 st.markdown("""
 <style>
@@ -88,6 +140,11 @@ PALETTE: dict[str, tuple[str, str]] = {
 }
 VALID_CODES = set(PALETTE.keys())
 
+# Traffic Lanes may carry a direction suffix (matches mapApp.py): "T<" left,
+# "T>" right, "T^" up, "Tv" down. They draw and count as plain "T".
+TRAFFIC_CODE = "T"
+TRAFFIC_SUFFIXES = ("<", ">", "^", "v")
+
 
 def legend_chips_html() -> str:
     chips = []
@@ -121,8 +178,13 @@ def normalize_cell(v) -> str:
     """Upper-case a cell value and drop any Station ID suffix: 'P1', 'S22',
     'b7' -> 'P', 'S', 'B'. Only a zone letter followed by extra letters/digits
     is trimmed; plain codes and the base cells '0' / '1' are left untouched
-    (so a value like '10' is not mistaken for a suffixed code)."""
-    s = str(v).strip().upper()
+    (so a value like '10' is not mistaken for a suffixed code). A Traffic
+    Lane with a direction suffix — 'T<', 'T>', 'T^', 'Tv' — becomes 'T'."""
+    raw = str(v).strip()
+    if (len(raw) == 2 and raw[0].upper() == TRAFFIC_CODE
+            and (raw[1] in TRAFFIC_SUFFIXES or raw[1] == "V")):
+        return TRAFFIC_CODE
+    s = raw.upper()
     if len(s) > 1 and s[0].isalpha() and s[0] in PALETTE and s[1:].isalnum():
         return s[0]
     return s
