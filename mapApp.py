@@ -45,8 +45,8 @@ from datetime import datetime
 
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
@@ -86,17 +86,15 @@ STATION_ID_MAX_LEN = 5
 TRAFFIC_CODE = "T"
 TRAFFIC_SUFFIXES = ("<", ">", "^", "v")
 
-# Map hover tooltip: a large, high-contrast box so the cell value is easy to
-# read. Every line uses this one size (the cell value is bold): Plotly sizes
-# the tooltip's box from a single font size, so mixing sizes makes the text
-# spill out of the box.
+# Map hover tooltip: a large, high-contrast box describing the cell under the
+# mouse (the cell value is bold).
 HOVER_FONT_PX = 18
-# Roughly how far (px) the tooltip opens to the side of the hovered cell, so
-# it doesn't cover the cell being picked.
-HOVER_OFFSET_X_PX = 75
-# The offset needs an SVG layer with one invisible marker per cell; above
-# this many cells it is skipped (tooltip at the cursor) to keep large maps fast.
-HOVER_OFFSET_MAX_CELLS = 60_000
+# Where the tooltip sits relative to the mouse, so it doesn't cover the cell
+# being picked: its left edge HOVER_OFFSET_X_PX to the right of the cursor and
+# its bottom edge HOVER_OFFSET_Y_PX above it (it flips to the other side near
+# the window's edges).
+HOVER_OFFSET_X_PX = 25
+HOVER_OFFSET_Y_PX = 25
 
 # The sample BaseMap supplied with this app (0 = non-movable, 1 = movable).
 SAMPLE_BASE_MAP = [
@@ -531,8 +529,17 @@ def make_figure(
         custom_data=["hover"],
     )
     fig.update_traces(
-        # The tooltip itself comes from the invisible "cell info" trace added
-        # further down (see the hover offset note there).
+        # Plotly's own tooltip for the cell under the mouse. The page normally
+        # hides it and shows the same text in its own box just beside the
+        # mouse instead (see map_tooltip_script); if that script can't run,
+        # this one shows as usual.
+        hovertemplate="%{customdata[0]}<extra></extra>",
+        hoverlabel=dict(
+            bgcolor="#1a1a2e",
+            bordercolor="#00d4ff",
+            font=dict(size=HOVER_FONT_PX, color="white", family="Arial, sans-serif"),
+            align="left",
+        ),
         marker=dict(symbol="square", line=dict(width=1, color="rgba(0,0,0,0.25)")),
         selected=dict(marker=dict(opacity=1)),
         unselected=dict(marker=dict(opacity=0.55)),
@@ -567,45 +574,6 @@ def make_figure(
     fig_height = int(round(cell_px * rows + MARGIN_T + MARGIN_B))
 
     fig.update_traces(marker=dict(size=cell_px * 0.92))
-
-    # Hover tooltip offset. Plotly draws a point's tooltip just outside that
-    # point's marker, so the zone traces above don't show tooltips at all;
-    # instead an invisible copy of the grid with much larger markers does.
-    # Hovering still picks the cell whose centre is nearest the mouse, but
-    # the tooltip now opens about HOVER_OFFSET_X_PX away (to the right, or to
-    # the left near the right edge), clear of the cell being picked. This
-    # keeps Plotly's own tooltip layout, so the text always sits inside its box.
-    #
-    # The invisible trace must be a regular (SVG) scatter: Plotly's WebGL
-    # scatter ignores marker size when placing the tooltip, which is why the
-    # tooltip sat on the cursor before. Only for very large maps (more than
-    # HOVER_OFFSET_MAX_CELLS cells) does it fall back to WebGL, to keep the
-    # map responsive; the tooltip is then at the cursor again.
-    fig.update_traces(hoverinfo="skip", hovertemplate=None)
-    hover_trace_cls = go.Scatter if rows * cols <= HOVER_OFFSET_MAX_CELLS else go.Scattergl
-    fig.add_trace(hover_trace_cls(
-        x=df["x"],
-        y=df["y"],
-        mode="markers",
-        customdata=df[["hover"]].to_numpy(),
-        hovertemplate="%{customdata[0]}<extra></extra>",
-        hoverlabel=dict(
-            bgcolor="#1a1a2e",  # fully opaque, so the map never shows through the text
-            bordercolor="#00d4ff",
-            font=dict(size=HOVER_FONT_PX, color="white", family="Arial, sans-serif"),
-            align="left",
-        ),
-        marker=dict(
-            symbol="square",
-            size=2 * HOVER_OFFSET_X_PX,
-            color="rgba(0,0,0,0)",           # fully transparent: never drawn
-            line=dict(width=0),
-        ),
-        selected=dict(marker=dict(opacity=0)),
-        unselected=dict(marker=dict(opacity=0)),
-        showlegend=False,
-        name="cell info",
-    ))
 
     fig.update_layout(
         width=fig_width,
@@ -661,6 +629,86 @@ def push_undo():
     st.session_state.undo_stack.append(copy.deepcopy(st.session_state.grid))
     if len(st.session_state.undo_stack) > UNDO_LIMIT:
         st.session_state.undo_stack.pop(0)
+
+
+# Custom map tooltip. Plotly can't place its tooltip at an offset from the
+# mouse, so this hides Plotly's own tooltip and shows the same text (for the
+# cell Plotly reports under the mouse) in a box of our own, just above and to
+# the right of the cursor. It runs from a zero-height helper frame and works
+# on the map in the main page; if it can't (e.g. a browser blocks it), the
+# `mapapp-tip-on` class is never set, so Plotly's normal tooltip still shows.
+_MAP_TOOLTIP_JS = """
+<script>
+(function () {
+  var P, doc;
+  try { P = window.parent; doc = P.document; } catch (e) { return; }
+  var DX = __DX__, DY = __DY__, FONT = __FONT__;
+
+  var tip = doc.getElementById('mapapp-tip');
+  if (!tip) {
+    tip = doc.createElement('div');
+    tip.id = 'mapapp-tip';
+    tip.style.cssText = [
+      'position:fixed', 'z-index:100000', 'display:none', 'pointer-events:none',
+      'background:#1a1a2e', 'color:#fff', 'border:2px solid #00d4ff',
+      'border-radius:6px', 'padding:6px 10px', 'white-space:nowrap',
+      'font:' + FONT + 'px Arial, sans-serif', 'line-height:1.35',
+      'box-shadow:0 4px 14px rgba(0,0,0,0.45)'
+    ].join(';');
+    doc.body.appendChild(tip);
+  }
+  doc.documentElement.classList.add('mapapp-tip-on');
+
+  function place(x, y) {
+    var w = tip.offsetWidth, h = tip.offsetHeight;
+    var left = x + DX, top = y - DY - h;            // above and to the right
+    if (left + w > P.innerWidth - 4) left = x - DX - w;   // flip left near the edge
+    if (top < 4) top = y + DY;                             // flip below near the top
+    tip.style.left = Math.max(4, left) + 'px';
+    tip.style.top = top + 'px';
+  }
+  function hide() { tip.style.display = 'none'; }
+
+  function attach(gd) {
+    if (gd.__mapappTip || typeof gd.on !== 'function') return;
+    gd.__mapappTip = true;
+    gd.on('plotly_hover', function (d) {
+      var pt = d && d.points && d.points[0];
+      var cd = pt && pt.customdata;
+      var text = Array.isArray(cd) ? cd[0] : cd;
+      if (!text) { hide(); return; }
+      tip.innerHTML = text;
+      tip.style.display = 'block';
+      if (d.event) place(d.event.clientX, d.event.clientY);
+    });
+    gd.on('plotly_unhover', hide);
+    gd.addEventListener('mousemove', function (e) {
+      if (tip.style.display === 'block') place(e.clientX, e.clientY);
+    });
+    gd.addEventListener('mouseleave', hide);
+  }
+  function scan() { doc.querySelectorAll('.js-plotly-plot').forEach(attach); }
+  scan();
+  setInterval(scan, 700);   // the map is redrawn on every rerun: re-attach
+})();
+</script>
+"""
+
+
+def render_map_tooltip():
+    """Hide Plotly's own map tooltip (only once our replacement is active)
+    and install the replacement that sits beside the mouse."""
+    st.markdown(
+        "<style>.mapapp-tip-on .js-plotly-plot .hoverlayer{opacity:0 !important;}</style>",
+        unsafe_allow_html=True,
+    )
+    components.html(
+        _MAP_TOOLTIP_JS
+        .replace("__DX__", str(int(HOVER_OFFSET_X_PX)))
+        .replace("__DY__", str(int(HOVER_OFFSET_Y_PX)))
+        .replace("__FONT__", str(int(HOVER_FONT_PX))),
+        height=0,
+    )
 
 
 def legend_chips_html() -> str:
@@ -1079,6 +1127,7 @@ def main_editor():
         height=fig_h,
         config={"displaylogo": False, "scrollZoom": True, "displayModeBar": True},
     )
+    render_map_tooltip()
     # Refresh selected_cells from this run's event too, so that if the user's
     # click both changed the selection AND landed on this same rerun as an
     # Apply/Undo click, downstream logic still sees the latest selection.
