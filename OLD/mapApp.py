@@ -11,6 +11,10 @@ heading). When a Station ID is entered (and is not blank or 0), it is appended
 to the zone code written into the grid, so a Stow Area painted with ID 22 is
 stored as "S22" instead of "S".
 
+Traffic Lanes (T) take a direction suffix instead: entering "<", ">", "^" or
+"v" in the Station ID field stores the cell as "T<", "T>", "T^" or "Tv". Any
+other Station ID is ignored for T, which then stays plain "T".
+
 Run with:
     streamlit run app.py
 
@@ -32,6 +36,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import hmac
+import html
 import json
 import os
 import re
@@ -40,6 +45,7 @@ from datetime import datetime
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
@@ -73,6 +79,21 @@ VALID_CODES = set(PALETTE.keys())
 # value becomes <code><id> (e.g. "S22") instead of just <code> ("S").
 STATION_ID_CODES = {"S", "P", "L", "I", "B"}
 STATION_ID_MAX_LEN = 5
+
+# Traffic Lanes (T) take a one-character direction suffix from the Station ID
+# field instead of a letters/digits ID: "T<" left, "T>" right, "T^" up,
+# "Tv" down. "v" is kept lower-case in the grid.
+TRAFFIC_CODE = "T"
+TRAFFIC_SUFFIXES = ("<", ">", "^", "v")
+
+# Map hover tooltip: a large, high-contrast box so the cell value is easy to
+# read. Every line uses this one size (the cell value is bold): Plotly sizes
+# the tooltip's box from a single font size, so mixing sizes makes the text
+# spill out of the box.
+HOVER_FONT_PX = 18
+# Roughly how far (px) the tooltip opens to the side of the hovered cell, so
+# it doesn't cover the cell being picked.
+HOVER_OFFSET_X_PX = 50
 
 # The sample BaseMap supplied with this app (0 = non-movable, 1 = movable).
 SAMPLE_BASE_MAP = [
@@ -191,9 +212,23 @@ def is_valid_collection_name(name: str) -> bool:
     return bool(_COLLECTION_NAME_RE.match(name))
 
 
+def normalize_cell_value(v) -> str:
+    """One grid value, trimmed and upper-cased — except a Traffic Lane
+    direction suffix, which is kept as-is ("Tv" stays "Tv", and a "TV" from an
+    older or hand-edited file is read back as "Tv")."""
+    s = str(v).strip().upper()
+    if len(s) == 2 and s[0] == TRAFFIC_CODE:
+        if s[1] == "V":
+            return TRAFFIC_CODE + "v"
+        if s[1] in TRAFFIC_SUFFIXES:
+            return s
+    return s
+
+
 def to_str_grid(raw_grid: list[list]) -> list[list[str]]:
-    """Normalize a grid (ints or strings) to a grid of upper-case strings."""
-    return [[str(v).strip().upper() for v in row] for row in raw_grid]
+    """Normalize a grid (ints or strings) to a grid of upper-case strings
+    (Traffic Lane suffixes such as "Tv" excepted)."""
+    return [[normalize_cell_value(v) for v in row] for row in raw_grid]
 
 
 # --------------------------------------------------------------------------
@@ -205,9 +240,12 @@ def base_code(v: str) -> str | None:
 
     Plain palette codes ("S", "T", "1", ...) map to themselves. For zone types
     that support Station IDs (S, P, L, I), a value like "S22" or "P3" also
-    maps to its leading type code ("S", "P")."""
+    maps to its leading type code ("S", "P"). A Traffic Lane with a direction
+    suffix ("T<", "T>", "T^", "Tv") maps to "T"."""
     if v in PALETTE:
         return v
+    if v and len(v) == 2 and v[0] == TRAFFIC_CODE and v[1] in TRAFFIC_SUFFIXES:
+        return TRAFFIC_CODE
     if (
         v
         and v[0] in STATION_ID_CODES
@@ -219,12 +257,23 @@ def base_code(v: str) -> str | None:
     return None
 
 
-def normalize_station_id(raw: str | None) -> tuple[str, str | None]:
-    """Clean up the Station ID field. Returns (station_id, error).
+def normalize_station_id(raw: str | None, zone_type: str = "") -> tuple[str, str | None]:
+    """Clean up the Station ID field for the zone type being painted.
+    Returns (station_id, error).
 
-    A blank value, or a value that is zero ("0", "00", ...), means "no
-    Station ID" and comes back as "". Otherwise the ID is upper-cased and
-    must be letters/digits only."""
+    For Traffic Lanes (T) the field holds a direction suffix: "<", ">", "^"
+    or "v" ("V" is accepted and stored as "v"). Anything else is ignored for
+    T, which is then painted as plain "T".
+
+    For every other type, a blank value, or a value that is zero ("0", "00",
+    ...), means "no Station ID" and comes back as "". Otherwise the ID is
+    upper-cased and must be letters/digits only."""
+    if zone_type == TRAFFIC_CODE:
+        s = (raw or "").strip()
+        if s in ("v", "V"):
+            return "v", None
+        return (s, None) if s in TRAFFIC_SUFFIXES else ("", None)
+
     s = (raw or "").strip().upper()
     if not s:
         return "", None
@@ -237,7 +286,10 @@ def normalize_station_id(raw: str | None) -> tuple[str, str | None]:
 
 def make_cell_code(zone_type: str, station_id: str) -> str:
     """Value written into the grid: '<type><id>' when the type supports
-    Station IDs and one was supplied (e.g. 'S22'), otherwise just '<type>'."""
+    Station IDs and one was supplied (e.g. 'S22'), or 'T' plus a direction
+    suffix (e.g. 'T<', 'Tv'), otherwise just '<type>'."""
+    if zone_type == TRAFFIC_CODE:
+        return f"{TRAFFIC_CODE}{station_id}" if station_id in TRAFFIC_SUFFIXES else TRAFFIC_CODE
     if station_id and zone_type in STATION_ID_CODES:
         return f"{zone_type}{station_id}"
     return zone_type
@@ -447,9 +499,18 @@ def make_figure(
             xs.append(c)
             ys.append(r)
             types.append(t)
-            tip = f"Row (Y): {r}<br>Col (X): {c}<br>Type: {t} — {label}"
+            # Hover tooltip: the cell's value (Station ID / direction kept,
+            # e.g. "S22", "T<") in large bold text, then its zone, Station ID
+            # or direction, and row/col. Escaped so "<" / ">" aren't read as
+            # HTML tags.
+            tip = (
+                f"<b>{html.escape(raw)}</b>"
+                f"<br>Type: {t} — {label}"
+            )
             if sid:
-                tip += f"<br>Station ID: {sid}"
+                kind = "Direction" if t == TRAFFIC_CODE else "Station ID"
+                tip += f"<br>{kind}: {html.escape(sid)}"
+            tip += f"<br>Row (Y): {r}  ·  Col (X): {c}"
             hover.append(tip)
 
     df = pd.DataFrame({"x": xs, "y": ys, "type": types, "hover": hover})
@@ -467,7 +528,8 @@ def make_figure(
         custom_data=["hover"],
     )
     fig.update_traces(
-        hovertemplate="%{customdata[0]}<extra></extra>",
+        # The tooltip itself comes from the invisible "cell info" trace added
+        # further down (see the hover offset note there).
         marker=dict(symbol="square", line=dict(width=1, color="rgba(0,0,0,0.25)")),
         selected=dict(marker=dict(opacity=1)),
         unselected=dict(marker=dict(opacity=0.55)),
@@ -502,6 +564,40 @@ def make_figure(
     fig_height = int(round(cell_px * rows + MARGIN_T + MARGIN_B))
 
     fig.update_traces(marker=dict(size=cell_px * 0.92))
+
+    # Hover tooltip offset. Plotly draws a point's tooltip just outside that
+    # point's marker, so the zone traces above don't show tooltips at all;
+    # instead an invisible copy of the grid with much larger markers does.
+    # Hovering still picks the cell whose centre is nearest the mouse, but
+    # the tooltip now opens about HOVER_OFFSET_X_PX away (to the right, or to
+    # the left near the right edge), clear of the cell being picked. This
+    # keeps Plotly's own tooltip layout, so the text always sits inside its box.
+    fig.update_traces(hoverinfo="skip", hovertemplate=None)
+    hover_trace_cls = go.Scattergl if fig.data and fig.data[0].type == "scattergl" else go.Scatter
+    fig.add_trace(hover_trace_cls(
+        x=df["x"],
+        y=df["y"],
+        mode="markers",
+        customdata=df[["hover"]].to_numpy(),
+        hovertemplate="%{customdata[0]}<extra></extra>",
+        hoverlabel=dict(
+            bgcolor="#1a1a2e",  # fully opaque, so the map never shows through the text
+            bordercolor="#00d4ff",
+            font=dict(size=HOVER_FONT_PX, color="white", family="Arial, sans-serif"),
+            align="left",
+        ),
+        marker=dict(
+            symbol="square",
+            size=2 * HOVER_OFFSET_X_PX,
+            color="rgba(0,0,0,0)",           # fully transparent: never drawn
+            line=dict(width=0),
+        ),
+        selected=dict(marker=dict(opacity=0)),
+        unselected=dict(marker=dict(opacity=0)),
+        showlegend=False,
+        name="cell info",
+    ))
+
     fig.update_layout(
         width=fig_width,
         height=fig_height,
@@ -879,12 +975,11 @@ def main_editor():
                 "Optional. For Storage/Stow, Pick, Load (Put), Induct and Build areas, a "
                 "Station ID that isn't blank or 0 is appended to the zone code "
                 "written into the map — e.g. a Stow Area with ID 22 is stored as "
-                "'S22' instead of 'S'. Ignored for Traffic, Queue and base cells."
+                "'S22' instead of 'S'. For Traffic Lanes (T), enter a direction "
+                "instead: <, >, ^ or v, stored as 'T<', 'T>', 'T^' or 'Tv' (anything "
+                "else leaves plain 'T'). Ignored for Queue and base cells."
             ),
         )
-    station_id, station_id_error = normalize_station_id(raw_station_id)
-    if station_id_error:
-        st.error(station_id_error)
 
     codes = list(PALETTE.keys())
     apply_type = st.radio(
@@ -894,6 +989,16 @@ def main_editor():
         horizontal=True,
         label_visibility="collapsed",
     )
+    # Checked against the type being painted: T takes a direction suffix,
+    # the station types take a letters/digits ID.
+    station_id, station_id_error = normalize_station_id(raw_station_id, apply_type)
+    if station_id_error:
+        st.error(station_id_error)
+    if apply_type == TRAFFIC_CODE and (raw_station_id or "").strip() and not station_id:
+        st.caption(
+            f"'{raw_station_id.strip()}' isn't a Traffic Lane direction (use <, >, ^ or v), "
+            "so cells will be painted as plain 'T'."
+        )
     apply_code = make_cell_code(apply_type, station_id)
     st.markdown(legend_chips_html(), unsafe_allow_html=True)
 

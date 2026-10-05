@@ -93,7 +93,10 @@ TRAFFIC_SUFFIXES = ("<", ">", "^", "v")
 HOVER_FONT_PX = 18
 # Roughly how far (px) the tooltip opens to the side of the hovered cell, so
 # it doesn't cover the cell being picked.
-HOVER_OFFSET_X_PX = 50
+HOVER_OFFSET_X_PX = 75
+# The offset needs an SVG layer with one invisible marker per cell; above
+# this many cells it is skipped (tooltip at the cursor) to keep large maps fast.
+HOVER_OFFSET_MAX_CELLS = 60_000
 
 # The sample BaseMap supplied with this app (0 = non-movable, 1 = movable).
 SAMPLE_BASE_MAP = [
@@ -572,8 +575,14 @@ def make_figure(
     # the tooltip now opens about HOVER_OFFSET_X_PX away (to the right, or to
     # the left near the right edge), clear of the cell being picked. This
     # keeps Plotly's own tooltip layout, so the text always sits inside its box.
+    #
+    # The invisible trace must be a regular (SVG) scatter: Plotly's WebGL
+    # scatter ignores marker size when placing the tooltip, which is why the
+    # tooltip sat on the cursor before. Only for very large maps (more than
+    # HOVER_OFFSET_MAX_CELLS cells) does it fall back to WebGL, to keep the
+    # map responsive; the tooltip is then at the cursor again.
     fig.update_traces(hoverinfo="skip", hovertemplate=None)
-    hover_trace_cls = go.Scattergl if fig.data and fig.data[0].type == "scattergl" else go.Scatter
+    hover_trace_cls = go.Scatter if rows * cols <= HOVER_OFFSET_MAX_CELLS else go.Scattergl
     fig.add_trace(hover_trace_cls(
         x=df["x"],
         y=df["y"],
