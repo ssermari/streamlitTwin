@@ -90,6 +90,10 @@ TRAFFIC_SUFFIXES = ("<", ">", "^", "v")
 # HOVER_FONT_PX.
 HOVER_FONT_PX = 16
 HOVER_VALUE_FONT_PX = 24
+# How far the tooltip is pushed away from the mouse, so it doesn't cover the
+# cell being picked: HOVER_OFFSET_X_PX to the right, HOVER_OFFSET_Y_PX up.
+HOVER_OFFSET_X_PX = 50
+HOVER_OFFSET_Y_PX = 50
 
 # The sample BaseMap supplied with this app (0 = non-movable, 1 = movable).
 SAMPLE_BASE_MAP = [
@@ -1030,6 +1034,19 @@ def main_editor():
     )
     fig, fig_w, fig_h = make_figure(
         grid, dragmode=dragmode, max_width_px=st.session_state.map_width_px
+    )
+    # Shift the map's hover tooltip up and to the right of the mouse so it
+    # doesn't cover the cell being selected. Plotly has no setting for this,
+    # so it's done with CSS: the `translate` property adds to the position
+    # Plotly gives the tooltip instead of replacing it.
+    st.markdown(
+        "<style>"
+        ".js-plotly-plot .hoverlayer .hovertext {"
+        f"translate: {HOVER_OFFSET_X_PX}px -{HOVER_OFFSET_Y_PX}px;"
+        "pointer-events: none;"
+        "}"
+        "</style>",
+        unsafe_allow_html=True,
     )
     event = st.plotly_chart(
         fig,
