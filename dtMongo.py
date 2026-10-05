@@ -299,6 +299,9 @@ if load_grid_clicked and v_options:
         else:
             rows, cols = len(grid), len(grid[0])
             st.session_state.grid = grid
+            # Raw cell values (Station IDs such as 'L1' or 'S22' kept) for the
+            # map's hover tooltip; `grid` above holds the normalised zone codes.
+            st.session_state.raw_grid = [[str(v).strip() for v in row] for row in doc["grid"]]
             st.session_state.grid_key = f'{zm_map_name}_v{doc["metadata"]["versionId"]}'
             st.session_state.map_version = doc["metadata"]["versionId"]
             st.session_state.map_name = zm_map_name
@@ -572,13 +575,26 @@ def get_base_fig_json() -> str:
     return st.session_state["_base_fig_json"]
 
 
+def get_cells_json() -> str:
+    """Raw cell values (Station IDs kept) for the hover tooltip, serialised
+    once per loaded map. Falls back to the normalised grid for a session
+    that loaded its map before raw values were stored."""
+    key = st.session_state.grid_key
+    if st.session_state.get("_cells_json_key") != key:
+        cells = st.session_state.get("raw_grid") or grid
+        st.session_state["_cells_json"] = json.dumps(cells)
+        st.session_state["_cells_json_key"] = key
+    return st.session_state["_cells_json"]
+
+
 # Self-contained page shown in an iframe. The grid is drawn once by Plotly;
 # the robots are painted on a transparent <canvas> laid over the plot, using
 # the plot's own axis ranges to convert grid cells to pixels, from a
 # requestAnimationFrame loop. Plotly is not touched per frame (redrawing its
 # shapes/annotations every frame is what made playback slow), and nothing is
 # re-sent from Streamlit per frame, so the map never blanks/strobes. The
-# overlay repaints itself if the user zooms or resets the plot.
+# overlay repaints itself if the user zooms or resets the plot. Hovering the
+# map shows a large tooltip with the cell under the mouse.
 PLAYER_HTML = """<!doctype html>
 <html><head><meta charset="utf-8">
 <script src="__PLOTLY_SRC__"></script>
@@ -593,15 +609,25 @@ PLAYER_HTML = """<!doctype html>
   #lb{white-space:nowrap}
   #wrap{position:relative}
   #ov{position:absolute;left:0;top:0;pointer-events:none}
+  #tip{position:absolute;display:none;pointer-events:none;z-index:10;
+       background:rgba(26,26,46,0.95);color:#fff;border:2px solid #00d4ff;
+       border-radius:8px;padding:8px 12px;font:16px system-ui,Arial,sans-serif;
+       line-height:1.35;white-space:nowrap;box-shadow:0 4px 14px rgba(0,0,0,0.45)}
+  #tip .v{font-size:24px;font-weight:800;color:#00d4ff}
+  #tip .sw{display:inline-block;width:14px;height:14px;border-radius:3px;
+       border:1px solid rgba(255,255,255,0.6);margin-right:6px;vertical-align:-1px}
+  #tip .rc{color:#bbb;font-size:15px}
 </style></head><body>
 <div id="bar"><button id="pp" title="Pause / play">&#9208;</button>
 <button id="rs" title="Restart">&#8634;</button>
 <input id="sc" type="range" min="0" max="0" step="any" value="0">
 <span id="lb"></span></div>
-<div id="wrap"><div id="plot"></div><canvas id="ov"></canvas></div>
+<div id="wrap"><div id="plot"></div><canvas id="ov"></canvas><div id="tip"></div></div>
 <script>
 const FIG = __FIG_JSON__;
 const P = __PAYLOAD_JSON__;
+const CELLS = __CELLS_JSON__;   // raw cell values, CELLS[row][col]
+const ZONES = __ZONES_JSON__;   // zone code -> [label, color]
 (function () {
   const gd = document.getElementById('plot');
   const pp = document.getElementById('pp'), rs = document.getElementById('rs');
@@ -652,10 +678,11 @@ const P = __PAYLOAD_JSON__;
     return out;
   }
 
-  let t = 0, playing = false, last = null, shown = -1;
+  let t = 0, playing = false, last = null, shown = -1, curPos = [];
   function setBtn() { pp.innerHTML = playing ? '&#9208;' : '&#9654;'; }
   function draw() {
-    paint(posAt(t));
+    curPos = posAt(t);
+    paint(curPos);
     const k = Math.min(Math.round(t), nk - 1);
     if (k !== shown) { shown = k; lb.textContent = labels[k] || ''; }
     sc.value = t;
@@ -678,6 +705,55 @@ const P = __PAYLOAD_JSON__;
   pp.onclick = function () { if (playing) { playing = false; setBtn(); } else { play(); } };
   rs.onclick = function () { t = 0; draw(); play(); };
   sc.oninput = function () { playing = false; setBtn(); t = parseFloat(sc.value); draw(); };
+
+  // ── Hover tooltip: the cell under the mouse — its value (Station ID kept),
+  // zone, row/col and any pallet covering that point — in a large, easy-to-
+  // read box that follows the mouse.
+  const wrap = document.getElementById('wrap'), tip = document.getElementById('tip');
+  const esc = s => String(s).replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
+  function zoneOf(raw) {
+    const s = String(raw).trim().toUpperCase();
+    if (s.length > 1 && ZONES[s[0]] && /^[A-Z]$/.test(s[0])) return s[0];
+    return s;
+  }
+  function hideTip() { tip.style.display = 'none'; }
+  wrap.addEventListener('mousemove', function (ev) {
+    const fl = gd._fullLayout;
+    if (!fl || !fl.xaxis) return;
+    const xa = fl.xaxis, ya = fl.yaxis;
+    const box = gd.getBoundingClientRect();
+    const mx = ev.clientX - box.left, my = ev.clientY - box.top;
+    if (mx < xa._offset || mx > xa._offset + xa._length ||
+        my < ya._offset || my > ya._offset + ya._length) { hideTip(); return; }
+    const xr0 = xa.range[0], xr1 = xa.range[1], yr0 = ya.range[0], yr1 = ya.range[1];
+    const x = xr0 + (mx - xa._offset) * (xr1 - xr0) / xa._length;
+    const y = yr1 - (my - ya._offset) * (yr1 - yr0) / ya._length;
+    const col = Math.round(x), row = Math.round(y);
+    if (row < 0 || row >= CELLS.length || col < 0 || col >= (CELLS[row] || []).length) {
+      hideTip(); return;
+    }
+    const raw = CELLS[row][col], code = zoneOf(raw), z = ZONES[code];
+    let html = '<div class="v">' + esc(raw) + '</div>';
+    if (z) html += '<div><span class="sw" style="background:' + z[1] + '"></span>' + esc(z[0]) + '</div>';
+    html += '<div class="rc">row ' + row + ' &middot; col ' + col + '</div>';
+    const here = [];
+    for (let i = 0; i < n; i++) {
+      const p = curPos[i];
+      if (p && Math.abs(p[0] - x) <= half && Math.abs(p[1] - y) <= half) here.push(ids[i]);
+    }
+    if (here.length) html += '<div>Pallet: <b>' + here.map(esc).join(', ') + '</b></div>';
+    tip.innerHTML = html;
+    tip.style.display = 'block';
+    // keep the box inside the visible frame: flip left / up near the edges
+    const wb = wrap.getBoundingClientRect();
+    const lx = ev.clientX - wb.left, ly = ev.clientY - wb.top;
+    const tw = tip.offsetWidth, th = tip.offsetHeight;
+    const left = (lx + 18 + tw > wb.width) ? lx - tw - 18 : lx + 18;
+    const top = (ly + 18 + th > wb.height) ? ly - th - 18 : ly + 18;
+    tip.style.left = Math.max(0, left) + 'px';
+    tip.style.top = Math.max(0, top) + 'px';
+  });
+  wrap.addEventListener('mouseleave', hideTip);
 
   Plotly.newPlot(gd, FIG.data, FIG.layout,
                  {displayModeBar: false, responsive: false}).then(function () {
@@ -716,6 +792,8 @@ def render_player(placeholder):
                  f"https://cdn.plot.ly/plotly-{plotly.offline.get_plotlyjs_version()}.min.js")
         .replace("__FIG_JSON__", js(get_base_fig_json()))
         .replace("__PAYLOAD_JSON__", js(json.dumps(payload)))
+        .replace("__CELLS_JSON__", js(get_cells_json()))
+        .replace("__ZONES_JSON__", js(json.dumps({k: list(v) for k, v in PALETTE.items()})))
     )
     with placeholder.container():
         components.html(page, height=int(fig_h) + PLAYER_BAR_PX + 4, scrolling=True)
