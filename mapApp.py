@@ -45,6 +45,7 @@ from datetime import datetime
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
@@ -90,10 +91,9 @@ TRAFFIC_SUFFIXES = ("<", ">", "^", "v")
 # the tooltip's box from a single font size, so mixing sizes makes the text
 # spill out of the box.
 HOVER_FONT_PX = 18
-# How far the tooltip is pushed away from the mouse, so it doesn't cover the
-# cell being picked: HOVER_OFFSET_X_PX to the right, HOVER_OFFSET_Y_PX up.
+# Roughly how far (px) the tooltip opens to the side of the hovered cell, so
+# it doesn't cover the cell being picked.
 HOVER_OFFSET_X_PX = 50
-HOVER_OFFSET_Y_PX = 50
 
 # The sample BaseMap supplied with this app (0 = non-movable, 1 = movable).
 SAMPLE_BASE_MAP = [
@@ -528,15 +528,8 @@ def make_figure(
         custom_data=["hover"],
     )
     fig.update_traces(
-        hovertemplate="%{customdata[0]}<extra></extra>",
-        # Same large, dark tooltip for every zone type (instead of a box in
-        # each trace's own colour, which is hard to read on the pale ones).
-        hoverlabel=dict(
-            bgcolor="#1a1a2e",  # fully opaque, so the map never shows through the text
-            bordercolor="#00d4ff",
-            font=dict(size=HOVER_FONT_PX, color="white", family="Arial, sans-serif"),
-            align="left",
-        ),
+        # The tooltip itself comes from the invisible "cell info" trace added
+        # further down (see the hover offset note there).
         marker=dict(symbol="square", line=dict(width=1, color="rgba(0,0,0,0.25)")),
         selected=dict(marker=dict(opacity=1)),
         unselected=dict(marker=dict(opacity=0.55)),
@@ -571,6 +564,40 @@ def make_figure(
     fig_height = int(round(cell_px * rows + MARGIN_T + MARGIN_B))
 
     fig.update_traces(marker=dict(size=cell_px * 0.92))
+
+    # Hover tooltip offset. Plotly draws a point's tooltip just outside that
+    # point's marker, so the zone traces above don't show tooltips at all;
+    # instead an invisible copy of the grid with much larger markers does.
+    # Hovering still picks the cell whose centre is nearest the mouse, but
+    # the tooltip now opens about HOVER_OFFSET_X_PX away (to the right, or to
+    # the left near the right edge), clear of the cell being picked. This
+    # keeps Plotly's own tooltip layout, so the text always sits inside its box.
+    fig.update_traces(hoverinfo="skip", hovertemplate=None)
+    hover_trace_cls = go.Scattergl if fig.data and fig.data[0].type == "scattergl" else go.Scatter
+    fig.add_trace(hover_trace_cls(
+        x=df["x"],
+        y=df["y"],
+        mode="markers",
+        customdata=df[["hover"]].to_numpy(),
+        hovertemplate="%{customdata[0]}<extra></extra>",
+        hoverlabel=dict(
+            bgcolor="#1a1a2e",  # fully opaque, so the map never shows through the text
+            bordercolor="#00d4ff",
+            font=dict(size=HOVER_FONT_PX, color="white", family="Arial, sans-serif"),
+            align="left",
+        ),
+        marker=dict(
+            symbol="square",
+            size=2 * HOVER_OFFSET_X_PX,
+            color="rgba(0,0,0,0)",           # fully transparent: never drawn
+            line=dict(width=0),
+        ),
+        selected=dict(marker=dict(opacity=0)),
+        unselected=dict(marker=dict(opacity=0)),
+        showlegend=False,
+        name="cell info",
+    ))
+
     fig.update_layout(
         width=fig_width,
         height=fig_height,
@@ -1034,21 +1061,6 @@ def main_editor():
     )
     fig, fig_w, fig_h = make_figure(
         grid, dragmode=dragmode, max_width_px=st.session_state.map_width_px
-    )
-    # Shift the map's hover tooltip up and to the right of the mouse so it
-    # doesn't cover the cell being selected. Plotly has no setting for this,
-    # so it's done with CSS on the whole hover layer (the group holding the
-    # tooltip's box AND its text), so the box and text always move together.
-    # The `translate` property adds to the position Plotly gives the tooltip
-    # instead of replacing it.
-    st.markdown(
-        "<style>"
-        ".js-plotly-plot .main-svg .hoverlayer {"
-        f"translate: {HOVER_OFFSET_X_PX}px -{HOVER_OFFSET_Y_PX}px;"
-        "pointer-events: none;"
-        "}"
-        "</style>",
-        unsafe_allow_html=True,
     )
     event = st.plotly_chart(
         fig,
