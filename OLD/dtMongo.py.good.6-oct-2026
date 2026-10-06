@@ -393,8 +393,8 @@ st.caption(
     f"Loaded **{st.session_state.grid_key}** (map_version {LOADED_MAP_VERSION}) — "
     f"{GRID_COLS}×{GRID_ROWS} cells "
     f"({GRID_COLS * INCHES_PER_UNIT / 12:.0f}' × {GRID_ROWS * INCHES_PER_UNIT / 12:.0f}' "
-    f"at {INCHES_PER_UNIT:.0f}\" per cell). Carriers are drawn at their dimensions_in size, "
-    f"or {PALLET_SIZE_INCHES}\" square (~{PALLET_SIZE_UNITS:.1f} cells) when an event has none."
+    f"at {INCHES_PER_UNIT:.0f}\" per cell). Carriers are {PALLET_SIZE_INCHES}\" square "
+    f"(~{PALLET_SIZE_UNITS:.1f} cells)."
 )
 
 
@@ -495,47 +495,6 @@ def doc_to_df(doc):
     if rows:
         return pd.DataFrame(rows)
     return st.session_state.current_pos.copy()
-
-
-# ── Carrier footprint ──────────────────────────────────────────────────────────
-# Each carrier is drawn at the size in its event's "dimensions_in" field
-# ({"length_in": .., "width_in": ..}); carriers without it use the default
-# PALLET_SIZE_INCHES square. length_in runs along the map's x axis (columns)
-# and width_in along its y axis (rows).
-DEFAULT_HALF_SIZE = [PALLET_SIZE_UNITS / 2, PALLET_SIZE_UNITS / 2]
-
-
-def carrier_half_size(dims):
-    """[half_x, half_y] of a carrier in grid cells from a 'dimensions_in'
-    value, or None when it's missing or not usable."""
-    if not isinstance(dims, dict):
-        return None
-    try:
-        length_in = float(dims.get("length_in"))
-        width_in = float(dims.get("width_in"))
-    except (TypeError, ValueError):
-        return None
-    if length_in <= 0 or width_in <= 0:
-        return None
-    return [length_in / INCHES_PER_UNIT / 2, width_in / INCHES_PER_UNIT / 2]
-
-
-def carrier_sizes_from_events(events) -> dict:
-    """{carrier_id: [half_x, half_y]} from pathPlanningEvents* docs that carry
-    'dimensions_in'; the newest event per carrier wins (same order as
-    build_path_tracks uses)."""
-    sizes = {}
-    for e in sorted(events, key=lambda e: (event_time_ms(e), str(e.get("_id", "")))):
-        cid = e.get("carrier_id")
-        half = carrier_half_size(e.get("dimensions_in"))
-        if cid is not None and half:
-            sizes[cid] = half
-    return sizes
-
-
-def halves_for(ids, sizes: dict) -> list:
-    """Per-carrier half sizes, in the same order as `ids`."""
-    return [list(sizes.get(cid, DEFAULT_HALF_SIZE)) for cid in ids]
 
 
 def build_path_tracks(events, loaded_version, max_moves=None, allow_mismatch=False):
@@ -737,10 +696,6 @@ const ZONES = __ZONES_JSON__;   // zone code -> [label, color]
   const sc = document.getElementById('sc'), lb = document.getElementById('lb');
   const ids = P.ids, K = P.pos, labels = P.labels;
   const n = ids.length, nk = K.length, half = P.half;
-  // Per-carrier footprint [half_x, half_y] in grid cells (from each carrier's
-  // dimensions_in); carriers without one use the default square.
-  const HALVES = P.halves || null;
-  function halfOf(i) { return (HALVES && HALVES[i]) || [half, half]; }
   sc.max = Math.max(nk - 1, 0);
   if (nk < 2) { document.getElementById('bar').style.display = 'none'; }
 
@@ -759,6 +714,7 @@ const ZONES = __ZONES_JSON__;   // zone code -> [label, color]
     const fl = gd._fullLayout, xa = fl.xaxis, ya = fl.yaxis;
     const xr0 = xa.range[0], xr1 = xa.range[1], yr0 = ya.range[0], yr1 = ya.range[1];
     const sx = xa._length / (xr1 - xr0), sy = ya._length / (yr1 - yr0);
+    const hx = half * Math.abs(sx), hy = half * Math.abs(sy);
     ctx.clearRect(0, 0, fl.width, fl.height);
     ctx.save();
     ctx.beginPath(); ctx.rect(xa._offset, ya._offset, xa._length, ya._length); ctx.clip();
@@ -767,8 +723,6 @@ const ZONES = __ZONES_JSON__;   // zone code -> [label, color]
     for (let i = 0; i < n; i++) {
       const px = xa._offset + (pos[i][0] - xr0) * sx;
       const py = ya._offset + ya._length * (yr1 - pos[i][1]) / (yr1 - yr0);
-      const hs = halfOf(i);
-      const hx = hs[0] * Math.abs(sx), hy = hs[1] * Math.abs(sy);
       ctx.fillStyle = 'red'; ctx.strokeStyle = 'white';
       ctx.fillRect(px - hx, py - hy, 2 * hx, 2 * hy);
       ctx.strokeRect(px - hx, py - hy, 2 * hx, 2 * hy);
@@ -847,8 +801,7 @@ const ZONES = __ZONES_JSON__;   // zone code -> [label, color]
     const here = [];
     for (let i = 0; i < n; i++) {
       const p = curPos[i];
-      const hs = halfOf(i);
-      if (p && Math.abs(p[0] - x) <= hs[0] && Math.abs(p[1] - y) <= hs[1]) here.push(ids[i]);
+      if (p && Math.abs(p[0] - x) <= half && Math.abs(p[1] - y) <= half) here.push(ids[i]);
     }
     if (here.length) html += '<div>Pallet: <b>' + here.map(esc).join(', ') + '</b></div>';
     tip.innerHTML = html;
@@ -889,10 +842,6 @@ def render_player(placeholder):
             "step_ms": SPEED_MS["Normal"],
             "autoplay": False,
         }
-        # Keep each carrier's own size on the static map (after Stop) too.
-        halves = st.session_state.get("current_halves")
-        if halves and len(halves) == len(payload["ids"]):
-            payload["halves"] = halves
     payload = dict(payload, half=PALLET_SIZE_UNITS / 2, font=max(9, min(14, cell_px)))
 
     def js(s: str) -> str:
@@ -1227,13 +1176,12 @@ def show_log():
         )
 
 
-def set_final_positions(ids, last_pos, halves=None):
+def set_final_positions(ids, last_pos):
     st.session_state.current_pos = pd.DataFrame({
         "robot_id": ids,
         "x": [p[0] for p in last_pos],
         "y": [p[1] for p in last_pos],
     })
-    st.session_state.current_halves = halves
 
 
 def prep_digital_twin(events):
@@ -1288,16 +1236,6 @@ def prep_digital_twin(events):
                 pass
     for cid in ids:
         cur.setdefault(cid, [GRID_COLS / 2, GRID_ROWS / 2])
-
-    # Each carrier's footprint from its 'dimensions_in' (newest snapshot wins).
-    sizes = {}
-    for doc in sorted_events:
-        for c in doc.get("carriers", []):
-            half = carrier_half_size(c.get("dimensions_in")) if isinstance(c, dict) else None
-            if half and "carrier_id" in c:
-                sizes[str(c["carrier_id"])] = half
-    halves = halves_for(ids, sizes)
-
     snap = lambda: [list(cur[cid]) for cid in ids]
     keyframes, labels = [snap()], ["Start"]
     log_lines = []
@@ -1318,12 +1256,12 @@ def prep_digital_twin(events):
             f"**{label}** — robots: `{', '.join(sorted(in_doc, key=natural_key))}`")
 
     st.session_state.log_lines = log_lines
-    set_final_positions(ids, keyframes[-1], halves)
+    set_final_positions(ids, keyframes[-1])
     status_placeholder.info(
         f"▶ Playing {len(sorted_events)} event(s) for {len(ids)} carrier(s) in the "
         f"player below. Pause, restart or scrub with the bar above the map."
     )
-    return {"ids": ids, "pos": keyframes, "labels": labels, "halves": halves,
+    return {"ids": ids, "pos": keyframes, "labels": labels,
             "step_ms": step_ms * DIGITAL_TWIN_STEP_MULT, "autoplay": True}
 
 
@@ -1365,7 +1303,6 @@ def prep_path_planning(events):
         return None
 
     ids = sorted(tracks.keys(), key=natural_key)
-    halves = halves_for(ids, carrier_sizes_from_events(events))  # dimensions_in
     n_steps = max(len(tracks[c]) for c in ids)
 
     def pos_at(cid, k):
@@ -1392,7 +1329,7 @@ def prep_path_planning(events):
                else f"  ·  {n_distinct} distinct points")
         )
     st.session_state.log_lines = log_lines
-    set_final_positions(ids, keyframes[-1], halves)
+    set_final_positions(ids, keyframes[-1])
 
     status_placeholder.info(
         f"Loaded {stats['loaded']} event(s) → "
@@ -1403,7 +1340,7 @@ def prep_path_planning(events):
         f"{moves_to_play}); {skipped} idle step(s) skipped. Playing in the player "
         f"below: pause, restart or scrub with the bar above the map."
     )
-    return {"ids": ids, "pos": keyframes, "labels": labels, "halves": halves,
+    return {"ids": ids, "pos": keyframes, "labels": labels,
             "step_ms": step_ms, "autoplay": True}
 
 
@@ -1464,7 +1401,6 @@ def prep_path_planning_multi_batch(events, tid_value):
         return None
 
     ids = sorted({cid for _, tr, _ in active_batches for cid in tr}, key=natural_key)
-    halves = halves_for(ids, carrier_sizes_from_events(events))  # dimensions_in
     # Start every carrier at its first move location: the first point of its
     # path in the earliest batch that contains it.
     cur = {}
@@ -1499,7 +1435,7 @@ def prep_path_planning_multi_batch(events, tid_value):
         )
 
     st.session_state.log_lines = log_lines
-    set_final_positions(ids, keyframes[-1], halves)
+    set_final_positions(ids, keyframes[-1])
 
     skipped_batches = len(per_batch) - total_b
     status_placeholder.info(
@@ -1514,7 +1450,7 @@ def prep_path_planning_multi_batch(events, tid_value):
         f"one after another, in created_at order. Playing in the player below: pause, "
         f"restart or scrub with the bar above the map."
     )
-    return {"ids": ids, "pos": keyframes, "labels": labels, "halves": halves,
+    return {"ids": ids, "pos": keyframes, "labels": labels,
             "step_ms": step_ms, "autoplay": True}
 
 
