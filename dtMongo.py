@@ -921,7 +921,7 @@ with pb_col:
 with ev_col:
     events_to_load = st.number_input(
         "Events to load",
-        min_value=1, max_value=1000, value=250, step=1,
+        min_value=1, max_value=1000, value=1000, step=1,
         key="events_to_load",
         help="How many of the most recent events (newest created_at first) to pull "
              "from the selected topic, restricted to events tagged with a version "
