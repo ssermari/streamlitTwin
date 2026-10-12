@@ -301,12 +301,24 @@ ran_css = "\n".join(
 st.markdown(
     f"""
     <style>
+    /* Remove Streamlit's default ~6rem top gap */
+    [data-testid="stMainBlockContainer"], .block-container {{
+        padding-top: 1rem !important;
+    }}
+    /* Let the toolbar strip float transparently so content can start at the top */
+    [data-testid="stHeader"] {{
+        background: transparent !important;
+    }}
     .st-key-tp_header {{
         position: sticky;
-        top: 3.75rem;
+        top: 0;
         z-index: 999;
-        padding-top: 0.5rem;
+        padding-top: 0.25rem;
         {bg_css}
+    }}
+    .st-key-tp_header h1 {{
+        padding-top: 0 !important;
+        padding-bottom: 0.25rem !important;
     }}
     .st-key-tp_header hr {{ margin: 0.5rem 0 0 0; }}
     [class*="st-key-testid_"] {{
