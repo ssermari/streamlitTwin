@@ -389,6 +389,7 @@ def run_test(idx: int, system_prompt: str, raw_json: str):
 with left:
     system_prompt = st.text_area(
         "System prompt",
+        value="Carrier size is 52 inches x 52 inches",
         key=f"sys_{gen}",
         height=100,  # ~3 lines
     )
