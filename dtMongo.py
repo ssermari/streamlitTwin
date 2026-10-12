@@ -1032,6 +1032,7 @@ except PyMongoError:
 # created_at, and picking one narrows the created_at dropdown below to just
 # that test id's batches.
 tid_info: dict = {}                      # test-id value -> [events, events matching the map]
+tid_latest: dict = {}                    # test-id value -> newest event time (ms)
 for _e in _peek:
     _tid = get_test_id(_e)
     if _tid is None:
@@ -1039,8 +1040,15 @@ for _e in _peek:
     _row = tid_info.setdefault(_tid, [0, 0])
     _row[0] += 1
     _row[1] += int(event_matches_map(_e))
+    tid_latest[_tid] = max(tid_latest.get(_tid, 0), event_time_ms(_e))
 
-tid_options = ["ALL"] + sorted(tid_info.keys(), key=natural_key)
+# Most recently run Test ID first (by its newest event's created_at /
+# timestamp_epoch); ties fall back to natural name order.
+tid_options = ["ALL"] + sorted(
+    sorted(tid_info.keys(), key=natural_key),
+    key=lambda t: tid_latest.get(t, 0),
+    reverse=True,
+)
 if st.session_state.get("test_id_select") not in tid_options:
     st.session_state["test_id_select"] = "ALL"
 

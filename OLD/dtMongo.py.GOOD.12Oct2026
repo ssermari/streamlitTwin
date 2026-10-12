@@ -1,0 +1,1579 @@
+import hashlib
+import hmac
+import json
+
+import streamlit as st
+import streamlit.components.v1 as components
+import plotly.graph_objects as go
+import plotly.offline
+import pandas as pd
+import pymongo
+from pymongo.errors import PyMongoError
+import calendar
+import re
+import time
+from datetime import datetime, timezone
+
+# ── Page Config ────────────────────────────────────────────────────────────────
+st.set_page_config(layout="wide", page_title="Radiant Digital Twin", page_icon="📦")
+
+# ── Password gate ──────────────────────────────────────────────────────────────
+# Same scheme as mapApp.py. Only a salted SHA-256 hash of the password is
+# stored below — never the plaintext — so reading this source file does not
+# reveal the password. To change the password: pick a new one, compute
+#   hashlib.sha256((AUTH_SALT + "<new-password>").encode("utf-8")).hexdigest()
+# and paste the result into AUTH_PASSWORD_HASH. There is no way to recover
+# the plaintext password from the hash.
+AUTH_SALT = "dt-mongo-twin-v1:"
+AUTH_PASSWORD_HASH = "bd06bd8268d86a30fef668a60b8f8c7700a044869775a662004ac515ea990818"
+
+
+def _check_password(candidate: str) -> bool:
+    digest = hashlib.sha256((AUTH_SALT + candidate).encode("utf-8")).hexdigest()
+    return hmac.compare_digest(digest, AUTH_PASSWORD_HASH)
+
+
+def password_gate() -> None:
+    """Block the rest of the app until the correct password is entered.
+
+    Renders nothing but a password prompt (and, after a wrong attempt, a
+    "bad password" message) until authenticated for this browser session,
+    then lets the script continue. Calls st.stop() so nothing else — not
+    even the MongoDB connection — runs before authentication succeeds.
+    """
+    if st.session_state.get("_authenticated"):
+        return
+
+    st.session_state.setdefault("_auth_failed", False)
+
+    if st.session_state["_auth_failed"]:
+        st.write("bad password")
+
+    with st.form("_auth_form", clear_on_submit=True):
+        pw = st.text_input("Password", type="password", label_visibility="collapsed", placeholder="Password")
+        submitted = st.form_submit_button("Enter")
+
+    if submitted:
+        if _check_password(pw):
+            st.session_state["_authenticated"] = True
+            st.session_state["_auth_failed"] = False
+            st.rerun()
+        else:
+            st.session_state["_auth_failed"] = True
+            st.rerun()
+
+    st.stop()
+
+
+password_gate()  # blocks (st.stop()) until the correct password is entered
+
+st.markdown("""
+<style>
+    .block-container { padding-top: 1rem; padding-bottom: 1rem; }
+    h1 { margin-top: 0; margin-bottom: 0.25rem; padding-top: 0; padding-bottom: 0; }
+    .hwm-box {
+        background: #1a1a2e;
+        border-left: 4px solid #00d4ff;
+        border-radius: 6px;
+        padding: 0.6rem 1rem;
+        color: #00d4ff;
+        font-family: monospace;
+        font-size: 1rem;
+        margin-bottom: 1rem;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.title("Radiant Digital Twin")
+
+# ── Constants ──────────────────────────────────────────────────────────────────
+# Playback now runs in the browser (see PLAYER_HTML), which interpolates
+# between keyframes on every animation frame, so there are no per-sub-frame
+# server round trips. SPEED_MS is the time one move (one keyframe -> the next)
+# takes; digitalTwin snapshots are further apart, so they get a multiplier.
+SPEED_MS = {"Slow": 600, "Normal": 300, "Fast": 120, "Turbo": 40}
+DIGITAL_TWIN_STEP_MULT = 3
+PLAYER_BAR_PX = 36
+
+# Logical grid convention (matches mapApp.py / the Zone Map Editor): base unit
+# is 2'x2', rendered at 8x8 resolution per base unit, so each logical grid
+# unit/cell = (2 * 12) / 8 = 3 inches. Pallets are 52" square. Carrier
+# positions coming out of MongoDB are assumed to already be expressed in
+# these same logical units — i.e. one position unit = one grid cell — so no
+# separate pixel/image scale factor is needed anymore: whatever Zone Map is
+# loaded below simply *is* the coordinate space robots are plotted in.
+BASE_UNIT_FT              = 2
+LOGICAL_RES_PER_BASE_UNIT = 8
+INCHES_PER_UNIT           = (BASE_UNIT_FT * 12) / LOGICAL_RES_PER_BASE_UNIT  # 3.0
+PALLET_SIZE_INCHES        = 52
+PALLET_SIZE_UNITS         = PALLET_SIZE_INCHES / INCHES_PER_UNIT  # ~17.33 grid cells
+
+# Where saved Zone Maps live — same default target collection mapApp.py
+# writes to. Override via st.secrets["MONGO_ZONE_COLLECTION"] if needed.
+DEFAULT_ZONE_MAP_COLLECTION = "target_logical_maps"
+
+# Collections with any of these prefixes are offered as event sources.
+DIGITAL_TWIN_PREFIX       = "digitalTwin"
+PATH_PLANNING_PREFIX      = "pathPlanningEvents"
+EVENT_COLLECTION_PREFIXES = (DIGITAL_TWIN_PREFIX, PATH_PLANNING_PREFIX)
+
+# Colour of everything drawn *outside* the map's own coordinates (margins and
+# any spare width beside the map), so a small map doesn't look like open floor.
+OUTSIDE_MAP_COLOR = "#3a3a3a"
+
+DEFAULT_MAP_DISPLAY_WIDTH = 1000
+MAP_DISPLAY_MAX_HEIGHT_PX = 700
+
+# code -> (label, color). Identical to mapApp.py's PALETTE — this is the same
+# palette baked into every Zone Map, so the grid we render here and the
+# legend above it read exactly the same as in the Zone Map Editor.
+PALETTE: dict[str, tuple[str, str]] = {
+    "S": ("Storage / Stow Areas", "#F4A300"),
+    "P": ("Pick Stations", "#2ECC71"),
+    "L": ("Load (Put) Stations", "#3498DB"),
+    "I": ("Induct Area", "#E53935"),
+    "B": ("Build Area", "#8B5A2B"),
+    "T": ("Traffic Lanes", "#9B59B6"),
+    "Q": ("Queue Areas", "#F1C40F"),
+    "1": ("Legal / Movable (Base)", "#FAFAFA"),
+    "0": ("Illegal / Not Movable", "#8B8B8B"),
+}
+VALID_CODES = set(PALETTE.keys())
+
+# Traffic Lanes may carry a direction suffix (matches mapApp.py): "T<" left,
+# "T>" right, "T^" up, "Tv" down. They draw and count as plain "T".
+TRAFFIC_CODE = "T"
+TRAFFIC_SUFFIXES = ("<", ">", "^", "v")
+
+
+def legend_chips_html() -> str:
+    chips = []
+    for code, (label, color) in PALETTE.items():
+        text_color = "#111" if code in ("1",) else "#fff" if code not in ("Q",) else "#111"
+        chips.append(
+            f'<span style="display:inline-flex;align-items:center;margin:2px 8px 2px 0;'
+            f'padding:2px 8px;border-radius:12px;background:{color};color:{text_color};'
+            f'font-size:12px;border:1px solid rgba(0,0,0,0.15)">{code} · {label}</span>'
+        )
+    return "<div>" + "".join(chips) + "</div>"
+
+
+# ── MongoDB Connection ─────────────────────────────────────────────────────────
+@st.cache_resource
+def get_mongo_client():
+    return pymongo.MongoClient(st.secrets["MONGO_URI"])
+
+try:
+    mongo = get_mongo_client()
+    db = mongo[st.secrets["MONGO_DB"]]
+except Exception as e:
+    st.error(f"MongoDB connection failed: {e}")
+    st.stop()
+
+ZONE_MAP_COLLECTION = st.secrets.get("MONGO_ZONE_COLLECTION", DEFAULT_ZONE_MAP_COLLECTION)
+
+
+# ── Zone Map (grid) helpers — ported from mapApp.py ───────────────────────────
+def normalize_cell(v) -> str:
+    """Upper-case a cell value and drop any Station ID suffix: 'P1', 'S22',
+    'b7' -> 'P', 'S', 'B'. Only a zone letter followed by extra letters/digits
+    is trimmed; plain codes and the base cells '0' / '1' are left untouched
+    (so a value like '10' is not mistaken for a suffixed code). A Traffic
+    Lane with a direction suffix — 'T<', 'T>', 'T^', 'Tv' — becomes 'T'."""
+    raw = str(v).strip()
+    if (len(raw) == 2 and raw[0].upper() == TRAFFIC_CODE
+            and (raw[1] in TRAFFIC_SUFFIXES or raw[1] == "V")):
+        return TRAFFIC_CODE
+    s = raw.upper()
+    if len(s) > 1 and s[0].isalpha() and s[0] in PALETTE and s[1:].isalnum():
+        return s[0]
+    return s
+
+
+def to_str_grid(raw_grid: list[list]) -> list[list[str]]:
+    return [[normalize_cell(v) for v in row] for row in raw_grid]
+
+
+def validate_grid(grid: list[list[str]], allowed: set[str]) -> list[str]:
+    problems = []
+    if not grid or not isinstance(grid, list):
+        return ["Grid is empty."]
+    width = len(grid[0])
+    for r, row in enumerate(grid):
+        if len(row) != width:
+            problems.append(f"Row {r} has length {len(row)}, expected {width} (ragged grid).")
+        for c, v in enumerate(row):
+            if v not in allowed:
+                problems.append(f"Cell (row {r}, col {c}) has invalid value '{v}'.")
+    if len(problems) > 8:
+        problems = problems[:8] + [f"...and {len(problems) - 8} more issue(s)."]
+    return problems
+
+
+def list_zone_map_names(db, coll: str) -> list[str]:
+    try:
+        return sorted(db[coll].distinct("metadata.mapName"))
+    except PyMongoError:
+        return []
+
+
+def list_zone_map_versions(db, coll: str, map_name: str) -> list[dict]:
+    try:
+        cursor = (
+            db[coll]
+            .find({"metadata.mapName": map_name}, {"grid": 0})
+            .sort("metadata.versionId", -1)
+        )
+        return list(cursor)
+    except PyMongoError:
+        return []
+
+
+def load_zone_map(db, coll: str, doc_id) -> dict | None:
+    try:
+        return db[coll].find_one({"_id": doc_id})
+    except PyMongoError:
+        return None
+
+
+def version_ids_for_map_name(db, coll: str, map_name: str) -> set:
+    """Every versionId ever saved under this map name — used to restrict the
+    events topic query to events that belong to *this* map (any version of
+    it), not just events that happen to carry the currently loaded version."""
+    return {
+        d["metadata"]["versionId"]
+        for d in list_zone_map_versions(db, coll, map_name)
+        if "metadata" in d and "versionId" in d["metadata"]
+    }
+
+
+def list_event_collections(db) -> list[str]:
+    """Collections available as an event source: anything named
+    'digitalTwin*' or 'pathPlanningEvents*', so new topics show up
+    automatically without code changes."""
+    try:
+        names = db.list_collection_names()
+    except PyMongoError:
+        return []
+    return sorted(n for n in names if n.startswith(EVENT_COLLECTION_PREFIXES))
+
+
+def is_path_collection(name: str) -> bool:
+    return name.startswith(PATH_PLANNING_PREFIX)
+
+
+# ── Map-version helpers ───────────────────────────────────────────────────────
+def norm_version(v):
+    """Normalise a map version so 3, 3.0, '3' and 'v3' all compare equal."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if s[:1] in ("v", "V"):
+        s = s[1:]
+    try:
+        f = float(s)
+        if f.is_integer():
+            return str(int(f))
+    except ValueError:
+        pass
+    return s
+
+
+def version_mismatch_summary(events, loaded_version):
+    """Returns (number of events whose map_version != loaded map's version,
+    sorted list of the distinct map_version values seen on those events)."""
+    want = norm_version(loaded_version)
+    bad = [e for e in events if norm_version(e.get("map_version")) != want]
+    seen = sorted({("missing" if norm_version(e.get("map_version")) is None
+                    else norm_version(e.get("map_version"))) for e in bad})
+    return len(bad), seen
+
+
+# ── Session State ──────────────────────────────────────────────────────────────
+def init_state():
+    defaults = {
+        "grid": None,
+        "grid_key": None,
+        "map_version": None,
+        "current_pos": None,
+        "playing": False,
+        "frame_id": 0,
+        "log_lines": [],
+        "map_width_px": DEFAULT_MAP_DISPLAY_WIDTH,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+init_state()
+
+
+def create_center_positions(cols, rows, robot_ids=None):
+    if robot_ids is None:
+        robot_ids = []
+    return pd.DataFrame({
+        "robot_id": robot_ids,
+        "x": [cols / 2] * len(robot_ids),
+        "y": [rows / 2] * len(robot_ids),
+    })
+
+
+# ── 1. Setup: warehouse grid ───────────────────────────────────────────────────
+st.subheader("1. Setup")
+
+zm_names = list_zone_map_names(db, ZONE_MAP_COLLECTION)
+if not zm_names:
+    st.warning(
+        f"No saved Zone Maps found in the '{ZONE_MAP_COLLECTION}' collection. "
+        "Save one from the Zone Map Editor (mapApp.py) first."
+    )
+    st.stop()
+
+zc1, zc2, zc3 = st.columns([2, 2, 1])
+with zc1:
+    zm_map_name = st.selectbox("Map name", zm_names, key="zm_name_select")
+with zc2:
+    zm_versions = list_zone_map_versions(db, ZONE_MAP_COLLECTION, zm_map_name)
+    if zm_versions:
+        v_options = {
+            f'v{d["metadata"]["versionId"]} — {d["metadata"].get("changeDate", "")}': d["_id"]
+            for d in zm_versions
+        }
+        zm_version_choice = st.selectbox("Version", list(v_options.keys()), key="zm_version_select")
+    else:
+        v_options = {}
+        st.caption("No versions found for that map.")
+with zc3:
+    st.write("")
+    load_grid_clicked = st.button("Load this version", type="primary", use_container_width=True)
+
+if load_grid_clicked and v_options:
+    doc = load_zone_map(db, ZONE_MAP_COLLECTION, v_options[zm_version_choice])
+    if doc is None:
+        st.error("Could not reload that zone map document.")
+    elif "grid" not in doc:
+        st.error("That zone map document has no 'grid' field, so it can't be loaded.")
+    else:
+        grid = to_str_grid(doc["grid"])
+        problems = validate_grid(grid, VALID_CODES)
+        if problems:
+            st.error("Zone map failed validation:\n\n" + "\n".join(problems))
+        else:
+            rows, cols = len(grid), len(grid[0])
+            st.session_state.grid = grid
+            # Raw cell values (Station IDs such as 'L1' or 'S22' kept) for the
+            # map's hover tooltip; `grid` above holds the normalised zone codes.
+            st.session_state.raw_grid = [[str(v).strip() for v in row] for row in doc["grid"]]
+            st.session_state.grid_key = f'{zm_map_name}_v{doc["metadata"]["versionId"]}'
+            st.session_state.map_version = doc["metadata"]["versionId"]
+            st.session_state.map_name = zm_map_name
+            st.session_state.current_pos = create_center_positions(cols, rows)
+            st.session_state.playing = False
+            st.session_state.frame_id = 0
+            st.session_state.log_lines = []
+            st.session_state.pop("_base_fig_key", None)
+            st.session_state.player_payload = None
+            st.rerun()
+
+if st.session_state.grid is None:
+    st.info("👆 Pick a map name/version above and click **Load this version** to begin.")
+    st.stop()
+
+grid = st.session_state.grid
+GRID_ROWS, GRID_COLS = len(grid), len(grid[0])
+LOADED_MAP_VERSION = st.session_state.map_version
+# Falls back to the current dropdown selection only for a session predating
+# this field (map_name is otherwise always set together with the grid).
+LOADED_MAP_NAME = st.session_state.get("map_name", zm_map_name)
+# Every versionId ever saved under LOADED_MAP_NAME — the events query below
+# is restricted to these, so events belonging to some other map (by name)
+# never show up here even if a version number happened to line up.
+NAME_VERSION_IDS = version_ids_for_map_name(db, ZONE_MAP_COLLECTION, LOADED_MAP_NAME)
+st.caption(
+    f"Loaded **{st.session_state.grid_key}** (map_version {LOADED_MAP_VERSION}) — "
+    f"{GRID_COLS}×{GRID_ROWS} cells "
+    f"({GRID_COLS * INCHES_PER_UNIT / 12:.0f}' × {GRID_ROWS * INCHES_PER_UNIT / 12:.0f}' "
+    f"at {INCHES_PER_UNIT:.0f}\" per cell). Carriers are drawn at their dimensions_in size, "
+    f"or {PALLET_SIZE_INCHES}\" square (~{PALLET_SIZE_UNITS:.1f} cells) when an event has none."
+)
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+def epoch_to_str(epoch_ms):
+    try:
+        dt = datetime.fromtimestamp(int(epoch_ms) / 1000, tz=timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    except Exception:
+        return str(epoch_ms)
+
+
+def event_time_ms(doc) -> int:
+    """Event time in epoch ms. digitalTwin* docs carry timestamp_epoch;
+    pathPlanningEvents* docs carry created_at / updated_at (datetimes)."""
+    ts = doc.get("timestamp_epoch")
+    if ts is not None:
+        try:
+            return int(ts)
+        except (TypeError, ValueError):
+            pass
+    dt = doc.get("created_at") or doc.get("updated_at")
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        # exact integer math (no float rounding), so equal timestamps compare equal
+        return calendar.timegm(dt.utctimetuple()) * 1000 + dt.microsecond // 1000
+    return 0
+
+
+def sort_spec(path_mode: bool):
+    if path_mode:
+        # Newest created_at first. A planner run often writes every carrier's
+        # event with the *same* created_at (to the millisecond), so ties are
+        # broken by _id ASCENDING (insertion order): "latest 10" of a 20-carrier
+        # run is then c1..c10, not an arbitrary or reversed subset.
+        return [("created_at", pymongo.DESCENDING), ("_id", pymongo.ASCENDING)]
+    return [("timestamp_epoch", pymongo.DESCENDING)]
+
+
+def natural_key(s):
+    """Sort key so c2 comes before c10."""
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", str(s))]
+
+
+def get_test_id(doc):
+    """test-id is an optional field that may not exist on older documents yet,
+    and may be written as either 'test_id' or 'test-id' — accept both."""
+    v = doc.get("test_id")
+    return v if v is not None else doc.get("test-id")
+
+
+def group_events_by_time(events):
+    """Group events by their event time (created_at / timestamp_epoch), oldest
+    first — used to play a Test ID's created_at batches back one at a time,
+    in order, instead of merging them together."""
+    groups: dict[int, list] = {}
+    for e in events:
+        groups.setdefault(event_time_ms(e), []).append(e)
+    return sorted(groups.items())
+
+
+def map_name_filter(version_ids) -> dict:
+    """Mongo filter restricting to events tagged with one of this map name's
+    versionIds. version_ids=None means no restriction; an empty set means
+    this map name has no saved versions, so the filter matches nothing (as
+    it should — there is nothing for it to match). map_version is matched as
+    both int and str since it isn't guaranteed to be stored consistently."""
+    if version_ids is None:
+        return {}
+    values = list(version_ids) + [str(v) for v in version_ids]
+    return {"map_version": {"$in": values}}
+
+
+def fetch_events(col, n, path_mode=False, version_ids=None):
+    # Path events keep their _id: it is the tie-break when several events
+    # (or several events for one carrier) share the same created_at.
+    projection = None if path_mode else {"_id": 0}
+    query = map_name_filter(version_ids)
+    cursor = col.find(query, projection).sort(sort_spec(path_mode)).limit(int(n))
+    return list(cursor)
+
+
+def doc_to_df(doc):
+    """Carrier positions are read straight through — they're already in the
+    same logical grid units (1 unit = 1 cell) as the loaded Zone Map, so no
+    pixel/image scale factor applies here anymore."""
+    rows = []
+    for c in doc.get("carriers", []):
+        try:
+            rows.append({
+                "robot_id": c["carrier_id"],
+                "x": c["position"]["x"],
+                "y": c["position"]["y"],
+            })
+        except Exception as e:
+            print(f"BAD CARRIER: {e}")
+    if rows:
+        return pd.DataFrame(rows)
+    return st.session_state.current_pos.copy()
+
+
+# ── Carrier footprint ──────────────────────────────────────────────────────────
+# Each carrier is drawn at the size in its event's "dimensions_in" field
+# ({"length_in": .., "width_in": ..}); carriers without it use the default
+# PALLET_SIZE_INCHES square. length_in runs along the map's x axis (columns)
+# and width_in along its y axis (rows).
+DEFAULT_HALF_SIZE = [PALLET_SIZE_UNITS / 2, PALLET_SIZE_UNITS / 2]
+
+
+def carrier_half_size(dims):
+    """[half_x, half_y] of a carrier in grid cells from a 'dimensions_in'
+    value, or None when it's missing or not usable."""
+    if not isinstance(dims, dict):
+        return None
+    try:
+        length_in = float(dims.get("length_in"))
+        width_in = float(dims.get("width_in"))
+    except (TypeError, ValueError):
+        return None
+    if length_in <= 0 or width_in <= 0:
+        return None
+    return [length_in / INCHES_PER_UNIT / 2, width_in / INCHES_PER_UNIT / 2]
+
+
+def carrier_sizes_from_events(events) -> dict:
+    """{carrier_id: [half_x, half_y]} from pathPlanningEvents* docs that carry
+    'dimensions_in'; the newest event per carrier wins (same order as
+    build_path_tracks uses)."""
+    sizes = {}
+    for e in sorted(events, key=lambda e: (event_time_ms(e), str(e.get("_id", "")))):
+        cid = e.get("carrier_id")
+        half = carrier_half_size(e.get("dimensions_in"))
+        if cid is not None and half:
+            sizes[cid] = half
+    return sizes
+
+
+def halves_for(ids, sizes: dict) -> list:
+    """Per-carrier half sizes, in the same order as `ids`."""
+    return [list(sizes.get(cid, DEFAULT_HALF_SIZE)) for cid in ids]
+
+
+def build_path_tracks(events, loaded_version, max_moves=None, allow_mismatch=False):
+    """pathPlanningEvents* pipeline, in this order:
+       1. events = the docs already loaded (and narrowed to the chosen created_at),
+       2. keep only events whose map_version matches the loaded map (unless
+          allow_mismatch is set, in which case every event is used),
+       3. de-duplicate by carrier_id, keeping the latest event per carrier
+          (newest created_at; ties broken by the larger _id),
+       4. turn each remaining event's 'path' ([x, y] steps) into a track,
+          keeping only the first `max_moves` moves (max_moves + 1 points,
+          i.e. the start point plus that many moves) when max_moves is set.
+    Returns (tracks, stats) where tracks = {carrier_id: [(x, y), ...]}."""
+    want = norm_version(loaded_version)
+    n_match = sum(1 for e in events if norm_version(e.get("map_version")) == want)
+    matching = (list(events) if allow_mismatch
+                else [e for e in events if norm_version(e.get("map_version")) == want])
+
+    # Oldest -> newest, so a later event for the same carrier overwrites an
+    # earlier one and the newest survives. ObjectId hex strings sort in
+    # insertion order, which settles created_at ties.
+    latest = {}
+    for e in sorted(matching, key=lambda e: (event_time_ms(e), str(e.get("_id", "")))):
+        cid = e.get("carrier_id")
+        if cid is None:
+            continue
+        latest[cid] = e
+
+    tracks = {}
+    for cid, e in latest.items():
+        pts = []
+        for p in (e.get("path") or []):
+            if isinstance(p, (list, tuple)) and len(p) >= 2:
+                pts.append((float(p[0]), float(p[1])))
+        if not pts:
+            sp = e.get("start_position")
+            if isinstance(sp, (list, tuple)) and len(sp) >= 2:
+                pts.append((float(sp[0]), float(sp[1])))
+        if pts and max_moves is not None:
+            pts = pts[: int(max_moves) + 1]
+        if pts:
+            tracks[cid] = pts
+
+    stats = {
+        "loaded": len(events),
+        "matching": n_match,                     # events that match the loaded map
+        "mismatched": len(events) - n_match,     # events that don't
+        "used": len(matching),                   # events actually played from
+        "duplicates": len(matching) - len(latest),
+        "carriers": len(tracks),
+    }
+    return tracks, stats
+
+
+# ── Rendering ──────────────────────────────────────────────────────────────────
+def build_grid_traces(grid):
+    """One Scattergl trace per zone code (not one point-per-cell trace with a
+    per-point color array) — cheaper to build and to redraw, and lets each
+    trace use a single solid marker color instead of an array."""
+    rows = len(grid)
+    cols = len(grid[0]) if rows else 0
+    by_code = {code: {"x": [], "y": []} for code in PALETTE}
+    for r in range(rows):
+        row = grid[r]
+        for c in range(cols):
+            code = row[c] if row[c] in PALETTE else "0"
+            by_code[code]["x"].append(c)
+            by_code[code]["y"].append(r)
+
+    traces = []
+    for code, (label, color) in PALETTE.items():
+        xs, ys = by_code[code]["x"], by_code[code]["y"]
+        if not xs:
+            continue
+        traces.append(go.Scattergl(
+            x=xs, y=ys, mode="markers",
+            marker=dict(symbol="square", color=color, line=dict(width=0)),
+            hoverinfo="skip", showlegend=False, name=f"{code} · {label}",
+        ))
+    return traces, rows, cols
+
+
+def make_base_figure(grid, max_width_px, max_height_px=MAP_DISPLAY_MAX_HEIGHT_PX):
+    traces, rows, cols = build_grid_traces(grid)
+    fig = go.Figure(data=traces)
+
+    MARGIN = 10
+    MIN_CELL_PX, MAX_CELL_PX = 1, 34
+    width_budget = max(max_width_px - 2 * MARGIN, MIN_CELL_PX)
+    height_budget = max(max_height_px - 2 * MARGIN, MIN_CELL_PX)
+    cell_w = width_budget / max(cols, 1)
+    cell_h = height_budget / max(rows, 1)
+    cell_px = max(MIN_CELL_PX, min(MAX_CELL_PX, cell_w, cell_h))
+
+    fig_width = int(round(cell_px * cols + 2 * MARGIN))
+    fig_height = int(round(cell_px * rows + 2 * MARGIN))
+
+    fig.update_traces(marker=dict(size=cell_px * 0.92))
+    fig.update_layout(
+        width=fig_width,
+        height=fig_height,
+        margin=dict(l=MARGIN, r=MARGIN, t=MARGIN, b=MARGIN),
+        showlegend=False,
+        plot_bgcolor="white",           # the map itself
+        paper_bgcolor=OUTSIDE_MAP_COLOR,  # everything outside the map's coordinates
+    )
+    fig.update_xaxes(
+        range=[-0.5, cols - 0.5], visible=False,
+        showgrid=False, zeroline=False, constrain="domain",
+    )
+    fig.update_yaxes(
+        range=[rows - 0.5, -0.5], visible=False,  # row 0 at the top, matching mapApp.py
+        showgrid=False, zeroline=False,
+        scaleanchor="x", scaleratio=1, constrain="domain",
+    )
+    return fig, fig_width, fig_height, cell_px
+
+
+def get_base_figure():
+    """The zone grid itself never changes frame-to-frame — only the robot
+    overlay does — so the (potentially tens of thousands of cells) grid
+    trace is built once per (grid, display width) and cached, instead of
+    being rebuilt on every animation sub-frame."""
+    key = (st.session_state.grid_key, st.session_state.map_width_px, OUTSIDE_MAP_COLOR)
+    if st.session_state.get("_base_fig_key") != key:
+        fig, fw, fh, cell_px = make_base_figure(grid, st.session_state.map_width_px)
+        st.session_state["_base_fig"] = fig
+        st.session_state["_base_fig_dims"] = (fw, fh, cell_px)
+        st.session_state["_base_fig_key"] = key
+    fw, fh, cell_px = st.session_state["_base_fig_dims"]
+    return st.session_state["_base_fig"], fw, fh, cell_px
+
+
+def get_base_fig_json() -> str:
+    """The grid figure serialised once per (grid, display width) and cached."""
+    key = st.session_state.get("_base_fig_key")
+    if st.session_state.get("_base_fig_json_key") != key:
+        st.session_state["_base_fig_json"] = st.session_state["_base_fig"].to_json()
+        st.session_state["_base_fig_json_key"] = key
+    return st.session_state["_base_fig_json"]
+
+
+def get_cells_json() -> str:
+    """Raw cell values (Station IDs kept) for the hover tooltip, serialised
+    once per loaded map. Falls back to the normalised grid for a session
+    that loaded its map before raw values were stored."""
+    key = st.session_state.grid_key
+    if st.session_state.get("_cells_json_key") != key:
+        cells = st.session_state.get("raw_grid") or grid
+        st.session_state["_cells_json"] = json.dumps(cells)
+        st.session_state["_cells_json_key"] = key
+    return st.session_state["_cells_json"]
+
+
+# Self-contained page shown in an iframe. The grid is drawn once by Plotly;
+# the robots are painted on a transparent <canvas> laid over the plot, using
+# the plot's own axis ranges to convert grid cells to pixels, from a
+# requestAnimationFrame loop. Plotly is not touched per frame (redrawing its
+# shapes/annotations every frame is what made playback slow), and nothing is
+# re-sent from Streamlit per frame, so the map never blanks/strobes. The
+# overlay repaints itself if the user zooms or resets the plot. Hovering the
+# map shows a large tooltip with the cell under the mouse.
+PLAYER_HTML = """<!doctype html>
+<html><head><meta charset="utf-8">
+<script src="__PLOTLY_SRC__"></script>
+<style>
+  html,body{margin:0;background:__OUTSIDE_MAP_COLOR__;font-family:system-ui,Arial,sans-serif}
+  #bar{display:flex;align-items:center;gap:8px;padding:0 8px;height:30px;
+       box-sizing:border-box;background:#1a1a2e;color:#00d4ff;
+       font:13px ui-monospace,Menlo,Consolas,monospace}
+  #bar button{background:#00d4ff;color:#1a1a2e;border:0;border-radius:4px;
+       padding:2px 10px;font-size:13px;cursor:pointer}
+  #sc{flex:1;min-width:80px}
+  #lb{white-space:nowrap}
+  #wrap{position:relative}
+  #ov{position:absolute;left:0;top:0;pointer-events:none}
+  #tip{position:absolute;display:none;pointer-events:none;z-index:10;
+       background:rgba(26,26,46,0.95);color:#fff;border:2px solid #00d4ff;
+       border-radius:8px;padding:8px 12px;font:16px system-ui,Arial,sans-serif;
+       line-height:1.35;white-space:nowrap;box-shadow:0 4px 14px rgba(0,0,0,0.45)}
+  #tip .v{font-size:24px;font-weight:800;color:#00d4ff}
+  #tip .sw{display:inline-block;width:14px;height:14px;border-radius:3px;
+       border:1px solid rgba(255,255,255,0.6);margin-right:6px;vertical-align:-1px}
+  #tip .rc{color:#bbb;font-size:15px}
+</style></head><body>
+<div id="bar"><button id="pp" title="Pause / play">&#9208;</button>
+<button id="rs" title="Restart">&#8634;</button>
+<input id="sc" type="range" min="0" max="0" step="any" value="0">
+<span id="lb"></span></div>
+<div id="wrap"><div id="plot"></div><canvas id="ov"></canvas><div id="tip"></div></div>
+<script>
+const FIG = __FIG_JSON__;
+const P = __PAYLOAD_JSON__;
+const CELLS = __CELLS_JSON__;   // raw cell values, CELLS[row][col]
+const ZONES = __ZONES_JSON__;   // zone code -> [label, color]
+(function () {
+  const gd = document.getElementById('plot');
+  const pp = document.getElementById('pp'), rs = document.getElementById('rs');
+  const sc = document.getElementById('sc'), lb = document.getElementById('lb');
+  const ids = P.ids, K = P.pos, labels = P.labels;
+  const n = ids.length, nk = K.length, half = P.half;
+  // Per-carrier footprint [half_x, half_y] in grid cells (from each carrier's
+  // dimensions_in); carriers without one use the default square.
+  const HALVES = P.halves || null;
+  function halfOf(i) { return (HALVES && HALVES[i]) || [half, half]; }
+  sc.max = Math.max(nk - 1, 0);
+  if (nk < 2) { document.getElementById('bar').style.display = 'none'; }
+
+  const cv = document.getElementById('ov'), ctx = cv.getContext('2d');
+  function sizeCanvas() {
+    const W = gd._fullLayout.width, H = gd._fullLayout.height;
+    const d = window.devicePixelRatio || 1;
+    cv.width = Math.round(W * d); cv.height = Math.round(H * d);
+    cv.style.width = W + 'px'; cv.style.height = H + 'px';
+    ctx.setTransform(d, 0, 0, d, 0, 0);
+  }
+  // Paint every robot as a pallet-sized red square with its id, converting
+  // grid coordinates (x = column, y = row, row 0 at the top) to pixels with
+  // the plot's current axis ranges, so it stays correct when zoomed.
+  function paint(pos) {
+    const fl = gd._fullLayout, xa = fl.xaxis, ya = fl.yaxis;
+    const xr0 = xa.range[0], xr1 = xa.range[1], yr0 = ya.range[0], yr1 = ya.range[1];
+    const sx = xa._length / (xr1 - xr0), sy = ya._length / (yr1 - yr0);
+    ctx.clearRect(0, 0, fl.width, fl.height);
+    ctx.save();
+    ctx.beginPath(); ctx.rect(xa._offset, ya._offset, xa._length, ya._length); ctx.clip();
+    ctx.lineWidth = 2; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = '900 ' + P.font + 'px "Arial Black", Arial, sans-serif';
+    for (let i = 0; i < n; i++) {
+      const px = xa._offset + (pos[i][0] - xr0) * sx;
+      const py = ya._offset + ya._length * (yr1 - pos[i][1]) / (yr1 - yr0);
+      const hs = halfOf(i);
+      const hx = hs[0] * Math.abs(sx), hy = hs[1] * Math.abs(sy);
+      ctx.fillStyle = 'red'; ctx.strokeStyle = 'white';
+      ctx.fillRect(px - hx, py - hy, 2 * hx, 2 * hy);
+      ctx.strokeRect(px - hx, py - hy, 2 * hx, 2 * hy);
+      ctx.fillStyle = 'black'; ctx.fillText(ids[i], px, py);
+    }
+    ctx.restore();
+  }
+  function posAt(t) {
+    const i = Math.min(Math.floor(t), nk - 1), j = Math.min(i + 1, nk - 1), a = t - i;
+    const out = new Array(n);
+    for (let c = 0; c < n; c++) {
+      const p = K[i][c], q = K[j][c];
+      out[c] = [p[0] + (q[0] - p[0]) * a, p[1] + (q[1] - p[1]) * a];
+    }
+    return out;
+  }
+
+  let t = 0, playing = false, last = null, shown = -1, curPos = [];
+  function setBtn() { pp.innerHTML = playing ? '&#9208;' : '&#9654;'; }
+  function draw() {
+    curPos = posAt(t);
+    paint(curPos);
+    const k = Math.min(Math.round(t), nk - 1);
+    if (k !== shown) { shown = k; lb.textContent = labels[k] || ''; }
+    sc.value = t;
+  }
+  function tick(ts) {
+    if (!playing) { last = null; return; }
+    if (last === null) last = ts;
+    const dt = Math.min(ts - last, 100);   // don't jump after a hidden tab
+    last = ts;
+    t += dt / P.step_ms;
+    if (t >= nk - 1) { t = nk - 1; playing = false; setBtn(); }
+    draw();
+    if (playing) requestAnimationFrame(tick);
+  }
+  function play() {
+    if (nk < 2) return;
+    if (t >= nk - 1) t = 0;
+    playing = true; last = null; setBtn(); requestAnimationFrame(tick);
+  }
+  pp.onclick = function () { if (playing) { playing = false; setBtn(); } else { play(); } };
+  rs.onclick = function () { t = 0; draw(); play(); };
+  sc.oninput = function () { playing = false; setBtn(); t = parseFloat(sc.value); draw(); };
+
+  // ── Hover tooltip: the cell under the mouse — its value (Station ID kept),
+  // zone, row/col and any pallet covering that point — in a large, easy-to-
+  // read box that follows the mouse.
+  const wrap = document.getElementById('wrap'), tip = document.getElementById('tip');
+  const esc = s => String(s).replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
+  function zoneOf(raw) {
+    const s = String(raw).trim().toUpperCase();
+    if (s.length > 1 && ZONES[s[0]] && /^[A-Z]$/.test(s[0])) return s[0];
+    return s;
+  }
+  function hideTip() { tip.style.display = 'none'; }
+  wrap.addEventListener('mousemove', function (ev) {
+    const fl = gd._fullLayout;
+    if (!fl || !fl.xaxis) return;
+    const xa = fl.xaxis, ya = fl.yaxis;
+    const box = gd.getBoundingClientRect();
+    const mx = ev.clientX - box.left, my = ev.clientY - box.top;
+    if (mx < xa._offset || mx > xa._offset + xa._length ||
+        my < ya._offset || my > ya._offset + ya._length) { hideTip(); return; }
+    const xr0 = xa.range[0], xr1 = xa.range[1], yr0 = ya.range[0], yr1 = ya.range[1];
+    const x = xr0 + (mx - xa._offset) * (xr1 - xr0) / xa._length;
+    const y = yr1 - (my - ya._offset) * (yr1 - yr0) / ya._length;
+    const col = Math.round(x), row = Math.round(y);
+    if (row < 0 || row >= CELLS.length || col < 0 || col >= (CELLS[row] || []).length) {
+      hideTip(); return;
+    }
+    const raw = CELLS[row][col], code = zoneOf(raw), z = ZONES[code];
+    let html = '<div class="v">' + esc(raw) + '</div>';
+    if (z) html += '<div><span class="sw" style="background:' + z[1] + '"></span>' + esc(z[0]) + '</div>';
+    html += '<div class="rc">row ' + row + ' &middot; col ' + col + '</div>';
+    const here = [];
+    for (let i = 0; i < n; i++) {
+      const p = curPos[i];
+      const hs = halfOf(i);
+      if (p && Math.abs(p[0] - x) <= hs[0] && Math.abs(p[1] - y) <= hs[1]) here.push(ids[i]);
+    }
+    if (here.length) html += '<div>Pallet: <b>' + here.map(esc).join(', ') + '</b></div>';
+    tip.innerHTML = html;
+    tip.style.display = 'block';
+    // keep the box inside the visible frame: flip left / up near the edges
+    const wb = wrap.getBoundingClientRect();
+    const lx = ev.clientX - wb.left, ly = ev.clientY - wb.top;
+    const tw = tip.offsetWidth, th = tip.offsetHeight;
+    const left = (lx + 18 + tw > wb.width) ? lx - tw - 18 : lx + 18;
+    const top = (ly + 18 + th > wb.height) ? ly - th - 18 : ly + 18;
+    tip.style.left = Math.max(0, left) + 'px';
+    tip.style.top = Math.max(0, top) + 'px';
+  });
+  wrap.addEventListener('mouseleave', hideTip);
+
+  Plotly.newPlot(gd, FIG.data, FIG.layout,
+                 {displayModeBar: false, responsive: false}).then(function () {
+    sizeCanvas(); draw(); setBtn();
+    // repaint the overlay when the user zooms / resets the plot
+    gd.on('plotly_relayout', function () { sizeCanvas(); draw(); });
+    if (P.autoplay) play();
+  });
+})();
+</script></body></html>"""
+
+
+def render_player(placeholder):
+    """Show the map + robots. With a stored run (`player_payload`) the browser
+    plays it; otherwise it just shows the robots at their current positions."""
+    _, fig_w, fig_h, cell_px = get_base_figure()
+    payload = st.session_state.get("player_payload")
+    if payload is None:
+        cp = st.session_state.current_pos
+        payload = {
+            "ids": [str(r) for r in cp["robot_id"]],
+            "pos": [[[float(x), float(y)] for x, y in zip(cp["x"], cp["y"])]],
+            "labels": [""],
+            "step_ms": SPEED_MS["Normal"],
+            "autoplay": False,
+        }
+        # Keep each carrier's own size on the static map (after Stop) too.
+        halves = st.session_state.get("current_halves")
+        if halves and len(halves) == len(payload["ids"]):
+            payload["halves"] = halves
+    payload = dict(payload, half=PALLET_SIZE_UNITS / 2, font=max(9, min(14, cell_px)))
+
+    def js(s: str) -> str:
+        return s.replace("</", "<\\/")
+
+    page = (
+        PLAYER_HTML
+        .replace("__OUTSIDE_MAP_COLOR__", OUTSIDE_MAP_COLOR)
+        .replace("__PLOTLY_SRC__",
+                 f"https://cdn.plot.ly/plotly-{plotly.offline.get_plotlyjs_version()}.min.js")
+        .replace("__FIG_JSON__", js(get_base_fig_json()))
+        .replace("__PAYLOAD_JSON__", js(json.dumps(payload)))
+        .replace("__CELLS_JSON__", js(get_cells_json()))
+        .replace("__ZONES_JSON__", js(json.dumps({k: list(v) for k, v in PALETTE.items()})))
+    )
+    with placeholder.container():
+        components.html(page, height=int(fig_h) + PLAYER_BAR_PX + 4, scrolling=True)
+
+
+# ── 2. Playback: event collection + controls ─────────────────────────────────
+# "Playback" heading with the number of events to pull sitting to its right.
+pb_col, ev_col, mm_col, _pb_spacer = st.columns(
+    [1.3, 1.5, 2.4, 4.6], vertical_alignment="bottom")
+with pb_col:
+    st.subheader("2. Playback")
+with ev_col:
+    events_to_load = st.number_input(
+        "Events to load",
+        min_value=1, max_value=1000, value=1000, step=1,
+        key="events_to_load",
+        help="How many of the most recent events (newest created_at first) to pull "
+             "from the selected topic, restricted to events tagged with a version "
+             "of the map currently loaded in Setup (by name — any saved version of "
+             "it, not just the specific one loaded). For pathPlanningEvents, "
+             "duplicates are then removed by carrier_id, keeping only the latest "
+             "event per carrier.",
+    )
+events_to_load = int(events_to_load)
+with mm_col:
+    allow_mismatch = st.checkbox(
+        "Allow map mismatch playback",
+        value=False,
+        key="allow_map_mismatch",
+        help="Off (default): only events whose map_version matches the loaded map "
+             "are played; any that don't are skipped. On: play every loaded event "
+             "regardless of its map_version.",
+    )
+
+event_colls = list_event_collections(db)
+if not event_colls:
+    st.warning(
+        "No collections found with the "
+        + " or ".join(f"'{p}*'" for p in EVENT_COLLECTION_PREFIXES)
+        + " prefix."
+    )
+    st.stop()
+
+def default_event_collection(names: list[str]) -> str:
+    """Default topic: a pathPlanningEvents* collection (the exact name
+    'pathPlanningEvents' if it exists, otherwise the first such match), then
+    the MONGO_COLLECTION secret, then whatever comes first."""
+    if PATH_PLANNING_PREFIX in names:
+        return PATH_PLANNING_PREFIX
+    path_names = [n for n in names if n.startswith(PATH_PLANNING_PREFIX)]
+    if path_names:
+        return path_names[0]
+    preferred = st.secrets.get("MONGO_COLLECTION")
+    return preferred if preferred in names else names[0]
+
+
+# The choice lives in session state under an explicit key so it survives
+# reruns (map loads, slider moves, Play/Stop). It is only (re)initialised when
+# nothing valid is stored yet.
+if st.session_state.get("event_coll_select") not in event_colls:
+    st.session_state["event_coll_select"] = default_event_collection(event_colls)
+
+# Playback collection, Test ID and created_at sit side by side (the Test ID
+# and created_at dropdowns are filled in further down, once the topic is
+# known, because their choices come from that topic's events).
+coll_col, tid_col, ts_col, _coll_spacer = st.columns([2.16, 2.16, 3.6, 1.28])
+with coll_col:
+    selected_coll_name = st.selectbox(
+        "Playback collection",
+        event_colls,
+        key="event_coll_select",
+        help="Collections starting with "
+             + " or ".join(f"'{p}*'" for p in EVENT_COLLECTION_PREFIXES) + ".",
+    )
+col = db[selected_coll_name]
+IS_PATH_MODE = is_path_collection(selected_coll_name)
+st.caption(
+    ("Mode: **path planning** — one event per carrier; all carriers' moves play in lock-step."
+     if IS_PATH_MODE else
+     "Mode: **digital twin** — each event is a snapshot of all carriers.")
+    + f"  ·  Restricted to events for map **{LOADED_MAP_NAME}**."
+)
+
+# Switching collections: stop any playback and drop the previous collection's
+# event log / robots so stale output from the old topic can't be mistaken for
+# the new one.
+if st.session_state.get("_active_event_coll") != selected_coll_name:
+    st.session_state["_active_event_coll"] = selected_coll_name
+    st.session_state.playing = False
+    st.session_state.player_payload = None
+    st.session_state.log_lines = []
+    st.session_state["created_at_select"] = "ALL"
+    st.session_state["test_id_select"] = "ALL"
+    st.session_state.current_pos = create_center_positions(GRID_COLS, GRID_ROWS)
+
+
+# ── created_at filter: choices come from the events retrieved from the topic ─
+def fmt_ms(ms: int) -> str:
+    if not ms:
+        return "(no timestamp)"
+    dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+    return dt.strftime("%Y-%m-%d %H:%M:%S") + f".{ms % 1000:03d} UTC"
+
+
+def event_matches_map(e) -> bool:
+    return norm_version(e.get("map_version")) == norm_version(LOADED_MAP_VERSION)
+
+
+try:
+    # Same query/sort/limit/map-name filter as the real playback fetch, but
+    # only the fields needed here, so this stays cheap on every rerun.
+    _peek = list(
+        col.find(map_name_filter(NAME_VERSION_IDS),
+                 {"_id": 0, "created_at": 1, "updated_at": 1, "timestamp_epoch": 1,
+                  "map_version": 1, "test_id": 1, "test-id": 1})
+           .sort(sort_spec(IS_PATH_MODE)).limit(events_to_load)
+    )
+except PyMongoError:
+    _peek = []
+
+# ── Test ID filter: an optional grouping field (test_id / test-id) that may
+# not be on every document yet. Choices come from the same peeked set as
+# created_at, and picking one narrows the created_at dropdown below to just
+# that test id's batches.
+tid_info: dict = {}                      # test-id value -> [events, events matching the map]
+for _e in _peek:
+    _tid = get_test_id(_e)
+    if _tid is None:
+        continue
+    _row = tid_info.setdefault(_tid, [0, 0])
+    _row[0] += 1
+    _row[1] += int(event_matches_map(_e))
+
+tid_options = ["ALL"] + sorted(tid_info.keys(), key=natural_key)
+if st.session_state.get("test_id_select") not in tid_options:
+    st.session_state["test_id_select"] = "ALL"
+
+
+def fmt_tid_option(o) -> str:
+    if o == "ALL":
+        return "ALL"
+    n, m = tid_info.get(o, [0, 0])
+    return f"{o}  ·  {n} event(s), {m} match map"
+
+
+with tid_col:
+    tid_choice = st.selectbox(
+        "Test ID",
+        tid_options,
+        key="test_id_select",
+        format_func=fmt_tid_option,
+        help="Optional grouping field on events (test_id / test-id) — appears here "
+             "once events start carrying it. ALL plays every loaded event; picking "
+             "one restricts this and the created_at filter to that test id's events. "
+             "With created_at left on ALL, that test id's created_at batches play one "
+             "after another, in created_at order — each batch's carrier moves finish "
+             "before the next batch starts — instead of being merged together.",
+    )
+tid_filter = None if tid_choice == "ALL" else tid_choice
+
+# created_at choices are narrowed to the selected test id, if any.
+_peek_for_ts = _peek if tid_filter is None else [e for e in _peek if get_test_id(e) == tid_filter]
+
+ts_info: dict[int, list[int]] = {}       # timestamp (ms) -> [events, events matching the map]
+for _e in _peek_for_ts:
+    _row = ts_info.setdefault(event_time_ms(_e), [0, 0])
+    _row[0] += 1
+    _row[1] += int(event_matches_map(_e))
+
+ts_options = ["ALL"] + list(ts_info.keys())          # newest first, ALL on top
+if st.session_state.get("created_at_select") not in ts_options:
+    st.session_state["created_at_select"] = "ALL"
+
+
+def fmt_ts_option(o) -> str:
+    if o == "ALL":
+        return "ALL"
+    n, m = ts_info.get(o, [0, 0])
+    return f"{fmt_ms(o)}  ·  {n} event(s), {m} match map"
+
+
+with ts_col:
+    ts_choice = st.selectbox(
+        "created_at" if IS_PATH_MODE else "Event timestamp",
+        ts_options,
+        key="created_at_select",
+        format_func=fmt_ts_option,
+        help="The distinct timestamps among the events loaded from this topic "
+             "(the number set in 'Events to load', narrowed to the Test ID chosen "
+             "above if any). ALL plays every loaded event; picking one plays only "
+             "the events with exactly that timestamp.",
+    )
+ts_filter = None if ts_choice == "ALL" else int(ts_choice)
+
+# ── High Water Mark ────────────────────────────────────────────────────────────
+# Restricted to this map name too, so the HWM reflects the same events
+# playback would actually use, not some other map's activity in this topic.
+hwm_doc = col.find_one(
+    map_name_filter(NAME_VERSION_IDS),
+    {"timestamp_epoch": 1, "created_at": 1, "updated_at": 1, "map_version": 1, "_id": 0},
+    sort=sort_spec(IS_PATH_MODE),
+)
+if hwm_doc:
+    hwm = event_time_ms(hwm_doc)
+    st.markdown(
+        f'<div class="hwm-box">⬆ HIGH WATER MARK &nbsp;|&nbsp; '
+        f'<b>{epoch_to_str(hwm)}</b> &nbsp;·&nbsp; epoch&nbsp;{hwm} '
+        f'&nbsp;·&nbsp; <span style="opacity:0.7">{selected_coll_name}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+    # Map version check: the loaded map must match the events' map_version.
+    latest_ver = hwm_doc.get("map_version")
+    if latest_ver is None:
+        st.info(
+            f"The latest event in '{selected_coll_name}' has no map_version field, "
+            f"so it can't be confirmed against the loaded map (v{LOADED_MAP_VERSION})."
+        )
+    elif norm_version(latest_ver) != norm_version(LOADED_MAP_VERSION):
+        st.warning(
+            f"⚠ Map version mismatch: the latest event in '{selected_coll_name}' "
+            f"was produced for map_version **{latest_ver}**, but the loaded map is "
+            f"version **{LOADED_MAP_VERSION}** ({st.session_state.grid_key}). "
+            f"Robots may not line up with this map."
+        )
+else:
+    st.warning(
+        f"No documents found in '{selected_coll_name}' for map "
+        f"'{LOADED_MAP_NAME}' (any of its {len(NAME_VERSION_IDS)} saved version(s))."
+    )
+
+# ── Playback controls ──────────────────────────────────────────────────────────
+ctrl1, ctrl2, ctrl3, ctrl4 = st.columns([3, 3, 1, 1])
+
+with ctrl1:
+    moves_to_play = st.slider(
+        "Number of moves to play",
+        min_value=25, max_value=1000, value=250, step=5,
+        disabled=not IS_PATH_MODE,
+        help="pathPlanningEvents only: how many moves along each carrier's path to "
+             "play back (all carriers move together, one move at a time). "
+             "Not used for digitalTwin topics, which replay whole snapshots.",
+    )
+
+with ctrl2:
+    speed_level = st.select_slider(
+        "Playback speed",
+        options=["Slow", "Normal", "Fast", "Turbo"],
+        value="Normal",
+    )
+    step_ms = SPEED_MS[speed_level]
+
+with ctrl3:
+    st.write("")
+    play_btn = st.button("▶ Play", type="primary", use_container_width=True)
+
+with ctrl4:
+    st.write("")
+    stop_btn = st.button("⏹ Stop", use_container_width=True)
+
+st.session_state.map_width_px = st.slider(
+    "Max map display width (px)",
+    min_value=400,
+    max_value=2200,
+    value=st.session_state.map_width_px,
+    step=50,
+    help="The map's height is derived automatically from the grid's own "
+         "row/column count, so it never looks stretched.",
+)
+
+# ── Placeholders ───────────────────────────────────────────────────────────────
+# The legend is declared as its own element right here, immediately after the
+# map's placeholder, so it always renders just below the map — regardless of
+# when render_player() below actually fills the map placeholder's content.
+chart_placeholder  = st.empty()
+st.markdown(legend_chips_html(), unsafe_allow_html=True)
+status_placeholder = st.empty()
+warn_placeholder   = st.empty()
+events_placeholder = st.empty()
+log_placeholder    = st.empty()
+
+def fmt_created(dt) -> str:
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+    return "" if dt is None else str(dt)
+
+
+def path_events_table(events, loaded_version) -> pd.DataFrame:
+    """One row per event that was fetched (newest first), showing exactly what
+    the playback is about to use: created_at, map_version (and whether it
+    matches the loaded map), path length, start/end points and how many
+    distinct points the path visits."""
+    want = norm_version(loaded_version)
+    rows = []
+    for e in events:
+        pts = [tuple(p[:2]) for p in (e.get("path") or [])
+               if isinstance(p, (list, tuple)) and len(p) >= 2]
+        rows.append({
+            "carrier_id": e.get("carrier_id"),
+            "created_at": fmt_created(e.get("created_at")),
+            "map_version": str(e.get("map_version")),
+            "matches_map": norm_version(e.get("map_version")) == want,
+            "path_points": len(pts),
+            "start": f"({pts[0][0]:g}, {pts[0][1]:g})" if pts else "",
+            "end": f"({pts[-1][0]:g}, {pts[-1][1]:g})" if pts else "",
+            "distinct_points": len(set(pts)),
+        })
+    return pd.DataFrame(rows)
+
+
+def show_log():
+    if st.session_state.log_lines:
+        log_placeholder.markdown(
+            "**Event Log**\n\n"
+            + "\n\n".join(f"- {line}" for line in st.session_state.log_lines)
+        )
+
+
+def set_final_positions(ids, last_pos, halves=None):
+    st.session_state.current_pos = pd.DataFrame({
+        "robot_id": ids,
+        "x": [p[0] for p in last_pos],
+        "y": [p[1] for p in last_pos],
+    })
+    st.session_state.current_halves = halves
+
+
+def prep_digital_twin(events):
+    """digitalTwin*: each event is a snapshot of carriers. Build one keyframe
+    per event, plus a starting keyframe in which every robot sits at its first
+    move location (the first position it has in the loaded snapshots) rather
+    than at the map centre. Carriers missing from a snapshot hold their last
+    position, and a carrier listed twice in one snapshot keeps its last entry.
+    Returns the payload the browser player animates, or None."""
+    sorted_events = sorted(events, key=lambda x: x["timestamp_epoch"])
+
+    n_bad, seen = version_mismatch_summary(sorted_events, LOADED_MAP_VERSION)
+    if n_bad and allow_mismatch:
+        warn_placeholder.warning(
+            f"⚠ Playing {n_bad} of {len(sorted_events)} event(s) whose map_version "
+            f"({', '.join(seen)}) doesn't match the loaded map "
+            f"(version {LOADED_MAP_VERSION}) — allowed by 'Allow map mismatch playback'."
+        )
+    elif n_bad:
+        warn_placeholder.warning(
+            f"⚠ {n_bad} of {len(sorted_events)} event(s) have a map_version "
+            f"({', '.join(seen)}) that doesn't match the loaded map "
+            f"(version {LOADED_MAP_VERSION}) and were skipped. Tick 'Allow map "
+            f"mismatch playback' to include them."
+        )
+        sorted_events = [e for e in sorted_events if event_matches_map(e)]
+        if not sorted_events:
+            status_placeholder.warning(
+                f"No playable events: none of the loaded events match "
+                f"map_version {LOADED_MAP_VERSION}."
+            )
+            return None
+
+    ids = sorted({str(c["carrier_id"]) for doc in sorted_events
+                  for c in doc.get("carriers", []) if "carrier_id" in c},
+                 key=natural_key)
+    if not ids:
+        status_placeholder.warning("The loaded events contain no carriers.")
+        return None
+
+    # Start every carrier at its first move location: the first position it
+    # has in the (time-ordered) snapshots. Only a carrier with no usable
+    # position anywhere falls back to the map centre.
+    cur = {}
+    for doc in sorted_events:
+        for c in doc.get("carriers", []):
+            try:
+                cid = str(c["carrier_id"])
+                if cid not in cur:
+                    cur[cid] = [float(c["position"]["x"]), float(c["position"]["y"])]
+            except Exception:  # noqa: BLE001 — bad entries are reported below
+                pass
+    for cid in ids:
+        cur.setdefault(cid, [GRID_COLS / 2, GRID_ROWS / 2])
+
+    # Each carrier's footprint from its 'dimensions_in' (newest snapshot wins).
+    sizes = {}
+    for doc in sorted_events:
+        for c in doc.get("carriers", []):
+            half = carrier_half_size(c.get("dimensions_in")) if isinstance(c, dict) else None
+            if half and "carrier_id" in c:
+                sizes[str(c["carrier_id"])] = half
+    halves = halves_for(ids, sizes)
+
+    snap = lambda: [list(cur[cid]) for cid in ids]
+    keyframes, labels = [snap()], ["Start"]
+    log_lines = []
+    for i, doc in enumerate(sorted_events):
+        in_doc = set()
+        for c in doc.get("carriers", []):
+            try:
+                cid = str(c["carrier_id"])
+                cur[cid] = [float(c["position"]["x"]), float(c["position"]["y"])]
+                in_doc.add(cid)
+            except Exception as e:  # noqa: BLE001
+                print(f"BAD CARRIER: {e}")
+        label = (f"Event {i + 1}/{len(sorted_events)}  ·  "
+                 f"{epoch_to_str(doc.get('timestamp_epoch', 0))}")
+        keyframes.append(snap())
+        labels.append(label)
+        log_lines.append(
+            f"**{label}** — robots: `{', '.join(sorted(in_doc, key=natural_key))}`")
+
+    st.session_state.log_lines = log_lines
+    set_final_positions(ids, keyframes[-1], halves)
+    status_placeholder.info(
+        f"▶ Playing {len(sorted_events)} event(s) for {len(ids)} carrier(s) in the "
+        f"player below. Pause, restart or scrub with the bar above the map."
+    )
+    return {"ids": ids, "pos": keyframes, "labels": labels, "halves": halves,
+            "step_ms": step_ms * DIGITAL_TWIN_STEP_MULT, "autoplay": True}
+
+
+def prep_path_planning(events):
+    """pathPlanningEvents*: one event per carrier, each holding that carrier's
+    whole 'path'. After the version filter and per-carrier de-duplication,
+    keyframe k holds every carrier's position after k moves, so all carriers
+    move together (a shorter path waits at its last point). Steps where no
+    carrier moves at all are dropped. Returns the payload the browser player
+    animates, or None."""
+    events_placeholder.dataframe(
+        path_events_table(events, LOADED_MAP_VERSION),
+        hide_index=True, use_container_width=True,
+    )
+    tracks, stats = build_path_tracks(
+        events, LOADED_MAP_VERSION, max_moves=moves_to_play, allow_mismatch=allow_mismatch)
+
+    if stats["mismatched"] and allow_mismatch:
+        warn_placeholder.warning(
+            f"⚠ Playing {stats['mismatched']} of {stats['loaded']} loaded event(s) whose "
+            f"map_version doesn't match the loaded map (version {LOADED_MAP_VERSION}) — "
+            f"allowed by 'Allow map mismatch playback'."
+        )
+    elif stats["mismatched"]:
+        warn_placeholder.warning(
+            f"⚠ {stats['mismatched']} of {stats['loaded']} loaded event(s) have a "
+            f"map_version that doesn't match the loaded map "
+            f"(version {LOADED_MAP_VERSION}) and were skipped. Tick 'Allow map "
+            f"mismatch playback' to include them."
+        )
+
+    if not tracks:
+        status_placeholder.warning(
+            f"No playable events: 0 of {stats['loaded']} loaded event(s) match "
+            f"map_version {LOADED_MAP_VERSION}."
+            if stats["used"] == 0 else
+            "The events contain no usable carrier_id / path data."
+        )
+        return None
+
+    ids = sorted(tracks.keys(), key=natural_key)
+    halves = halves_for(ids, carrier_sizes_from_events(events))  # dimensions_in
+    n_steps = max(len(tracks[c]) for c in ids)
+
+    def pos_at(cid, k):
+        pts = tracks[cid]
+        return list(pts[min(k, len(pts) - 1)])
+
+    keyframes, labels, skipped = [], [], 0
+    for k in range(n_steps):
+        frame = [pos_at(cid, k) for cid in ids]
+        if keyframes and frame == keyframes[-1]:
+            skipped += 1          # nobody moved this step: nothing to show
+            continue
+        keyframes.append(frame)
+        labels.append(f"Step {k}/{n_steps - 1}  ·  {len(ids)} carrier(s)  ·  map v{LOADED_MAP_VERSION}")
+
+    log_lines = []
+    for cid in ids:
+        pts = tracks[cid]
+        n_distinct = len(set(pts))
+        log_lines.append(
+            f"**{cid}** — {len(pts) - 1} move(s), "
+            f"({pts[0][0]:g}, {pts[0][1]:g}) → ({pts[-1][0]:g}, {pts[-1][1]:g})"
+            + ("  ⚠ doesn't move in these moves" if n_distinct == 1
+               else f"  ·  {n_distinct} distinct points")
+        )
+    st.session_state.log_lines = log_lines
+    set_final_positions(ids, keyframes[-1], halves)
+
+    status_placeholder.info(
+        f"Loaded {stats['loaded']} event(s) → "
+        + (f"{stats['used']} used (map check off) → " if allow_mismatch else
+           f"{stats['matching']} match map version {LOADED_MAP_VERSION} → ")
+        + f"{stats['duplicates']} duplicate(s) removed → "
+        f"{stats['carriers']} carrier(s), {n_steps - 1} move(s) each (limit "
+        f"{moves_to_play}); {skipped} idle step(s) skipped. Playing in the player "
+        f"below: pause, restart or scrub with the bar above the map."
+    )
+    return {"ids": ids, "pos": keyframes, "labels": labels, "halves": halves,
+            "step_ms": step_ms, "autoplay": True}
+
+
+def prep_path_planning_multi_batch(events, tid_value):
+    """pathPlanningEvents*, when a specific Test ID is selected and created_at
+    is left on ALL: group the loaded events by created_at and play each
+    batch's carrier moves through to completion, in created_at order (oldest
+    batch first), before starting the next batch — instead of merging every
+    loaded event into one concurrent run the way the ALL/ALL case normally
+    does. Every carrier starts at its first move location (the first point
+    of its path in the first batch it appears in), so a carrier that only
+    moves in a later batch waits there, not at the map centre. Carriers not
+    present in a given batch hold their last known position while that
+    batch's carriers move. Returns the payload the browser player animates,
+    or None."""
+    batches = group_events_by_time(events)  # [(ts_ms, [events]), ...] oldest first
+
+    events_placeholder.dataframe(
+        path_events_table(sorted(events, key=event_time_ms), LOADED_MAP_VERSION),
+        hide_index=True, use_container_width=True,
+    )
+
+    per_batch = []  # [(ts, tracks, stats), ...]
+    for ts, evs in batches:
+        tracks, stats = build_path_tracks(
+            evs, LOADED_MAP_VERSION, max_moves=moves_to_play, allow_mismatch=allow_mismatch)
+        per_batch.append((ts, tracks, stats))
+
+    total_loaded = sum(s["loaded"] for _, _, s in per_batch)
+    total_matching = sum(s["matching"] for _, _, s in per_batch)
+    total_mismatched = sum(s["mismatched"] for _, _, s in per_batch)
+    total_used = sum(s["used"] for _, _, s in per_batch)
+    total_dupes = sum(s["duplicates"] for _, _, s in per_batch)
+
+    if total_mismatched and allow_mismatch:
+        warn_placeholder.warning(
+            f"⚠ Playing {total_mismatched} of {total_loaded} loaded event(s) — across "
+            f"{len(per_batch)} created_at batch(es) for test id '{tid_value}' — whose "
+            f"map_version doesn't match the loaded map (version {LOADED_MAP_VERSION}) — "
+            f"allowed by 'Allow map mismatch playback'."
+        )
+    elif total_mismatched:
+        warn_placeholder.warning(
+            f"⚠ {total_mismatched} of {total_loaded} loaded event(s) — across "
+            f"{len(per_batch)} created_at batch(es) for test id '{tid_value}' — have a "
+            f"map_version that doesn't match the loaded map (version {LOADED_MAP_VERSION}) "
+            f"and were skipped. Tick 'Allow map mismatch playback' to include them."
+        )
+
+    active_batches = [(ts, tr, s) for ts, tr, s in per_batch if tr]
+    if not active_batches:
+        status_placeholder.warning(
+            f"No playable events for test id '{tid_value}': 0 of {total_loaded} loaded "
+            f"event(s) match map_version {LOADED_MAP_VERSION}."
+            if total_used == 0 else
+            "The events contain no usable carrier_id / path data."
+        )
+        return None
+
+    ids = sorted({cid for _, tr, _ in active_batches for cid in tr}, key=natural_key)
+    halves = halves_for(ids, carrier_sizes_from_events(events))  # dimensions_in
+    # Start every carrier at its first move location: the first point of its
+    # path in the earliest batch that contains it.
+    cur = {}
+    for _, tr, _ in active_batches:
+        for cid, pts in tr.items():
+            if cid not in cur:
+                cur[cid] = list(pts[0])
+
+    keyframes, labels, skipped = [], [], 0
+    total_b = len(active_batches)
+    log_lines = [f"**Test ID `{tid_value}`** — {total_b} created_at batch(es), "
+                 f"played in order:"]
+    for bi, (ts, tracks, stats) in enumerate(active_batches, start=1):
+        n_steps = max(len(p) for p in tracks.values())
+        batch_ids = sorted(tracks.keys(), key=natural_key)
+        for k in range(n_steps):
+            for cid in batch_ids:
+                pts = tracks[cid]
+                cur[cid] = list(pts[min(k, len(pts) - 1)])
+            frame = [list(cur[cid]) for cid in ids]
+            if keyframes and frame == keyframes[-1]:
+                skipped += 1          # nobody moved this step: nothing to show
+                continue
+            keyframes.append(frame)
+            labels.append(
+                f"Batch {bi}/{total_b}  ·  {fmt_ms(ts)}  ·  step {k}/{n_steps - 1}  ·  "
+                f"{len(batch_ids)} carrier(s)"
+            )
+        log_lines.append(
+            f"Batch {bi}/{total_b} — {fmt_ms(ts)} — {n_steps - 1} move(s) — carriers: "
+            f"`{', '.join(batch_ids)}`"
+        )
+
+    st.session_state.log_lines = log_lines
+    set_final_positions(ids, keyframes[-1], halves)
+
+    skipped_batches = len(per_batch) - total_b
+    status_placeholder.info(
+        f"Loaded {total_loaded} event(s) for test id '{tid_value}' across "
+        f"{len(per_batch)} created_at batch(es) → "
+        + (f"{total_used} used (map check off) → " if allow_mismatch else
+           f"{total_matching} match map version {LOADED_MAP_VERSION} → ")
+        + f"{total_dupes} duplicate(s) removed → {total_b} batch(es) played "
+        + (f"({skipped_batches} batch(es) had no playable events and were skipped) → "
+           if skipped_batches else "→ ")
+        + f"{len(ids)} carrier(s) total; {skipped} idle step(s) skipped. Batches play "
+        f"one after another, in created_at order. Playing in the player below: pause, "
+        f"restart or scrub with the bar above the map."
+    )
+    return {"ids": ids, "pos": keyframes, "labels": labels, "halves": halves,
+            "step_ms": step_ms, "autoplay": True}
+
+
+# ── Button state ───────────────────────────────────────────────────────────────
+if play_btn:
+    st.session_state.playing = True
+if stop_btn:
+    st.session_state.playing = False
+    st.session_state.player_payload = None   # back to a static map (final positions)
+
+# ── Playback: fetch + build the run *before* drawing the map ─────────────────
+if st.session_state.playing:
+    # Playback itself now happens in the browser, so this only prepares it.
+    st.session_state.playing = False
+    st.session_state.log_lines = []
+    log_placeholder.empty()
+    warn_placeholder.empty()
+    events_placeholder.empty()
+    status_placeholder.info(
+        f"Loading events from '{selected_coll_name}' for map '{LOADED_MAP_NAME}'..."
+    )
+    events = fetch_events(col, events_to_load, path_mode=IS_PATH_MODE,
+                          version_ids=NAME_VERSION_IDS)
+    no_events_msg = None
+    if not events:
+        no_events_msg = (
+            f"No events found in '{selected_coll_name}' for map '{LOADED_MAP_NAME}'."
+        )
+    elif tid_filter is not None:
+        events = [e for e in events if get_test_id(e) == tid_filter]
+        if not events:
+            no_events_msg = (
+                f"None of the newest {events_to_load} event(s) are tagged with test "
+                f"id '{tid_filter}' any more — pick a test id again.")
+    if events and ts_filter is not None:
+        events = [e for e in events if event_time_ms(e) == ts_filter]
+        if not events:
+            no_events_msg = (
+                f"None of the newest {events_to_load} event(s) have timestamp "
+                f"{fmt_ms(ts_filter)} any more — pick a timestamp again.")
+    payload = None
+    if not events:
+        status_placeholder.warning(no_events_msg)
+    elif IS_PATH_MODE:
+        # A specific Test ID with created_at left on ALL plays that test id's
+        # created_at batches one after another, in order; every other
+        # combination uses the normal single merged-run playback.
+        if tid_filter is not None and ts_filter is None:
+            payload = prep_path_planning_multi_batch(events, tid_filter)
+        else:
+            payload = prep_path_planning(events)
+    else:
+        payload = prep_digital_twin(events)
+    if payload is not None:
+        payload["run_id"] = time.time_ns()   # new run -> the player restarts
+        st.session_state.player_payload = payload
+
+# ── Map ───────────────────────────────────────────────────────────────────────
+render_player(chart_placeholder)
+
+# Event log survives reruns (Stop, slider moves, ...)
+show_log()
