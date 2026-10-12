@@ -264,7 +264,30 @@ SESSION_ID = st.session_state["tp_session_id"]
 # ---------------------------------------------------------------------------
 # CSS: frozen header, 100-char Test ID box, orange "ran" buttons
 # ---------------------------------------------------------------------------
-bg = st.get_option("theme.backgroundColor") or "#FFFFFF"
+LIGHT_BG, DARK_BG = "#FFFFFF", "#0E1117"  # Streamlit's built-in theme backgrounds
+
+
+def header_bg_css() -> str:
+    """Background for the frozen header that matches the active theme."""
+    custom = st.get_option("theme.backgroundColor")
+    if custom:  # an explicit theme colour in config.toml always wins
+        return f"background-color: {custom};"
+    theme_type = None
+    try:  # Streamlit >= 1.46 reports the theme the browser is actually showing
+        theme_type = st.context.theme.type
+    except Exception:
+        pass
+    if theme_type in ("light", "dark"):
+        return f"background-color: {DARK_BG if theme_type == 'dark' else LIGHT_BG};"
+    # Older Streamlit: follow the OS/browser setting (Streamlit's default mode)
+    return (
+        f"background-color: {LIGHT_BG};"
+        f"}} @media (prefers-color-scheme: dark) {{ .st-key-tp_header {{"
+        f" background-color: {DARK_BG};"
+    )
+
+
+bg_css = header_bg_css()
 ran_css = "\n".join(
     f"""
     .st-key-run_{gen}_{i} button {{
@@ -281,8 +304,8 @@ st.markdown(
         position: sticky;
         top: 3.75rem;
         z-index: 999;
-        background-color: {bg};
         padding-top: 0.5rem;
+        {bg_css}
     }}
     .st-key-tp_header hr {{ margin: 0.5rem 0 0 0; }}
     [class*="st-key-testid_"] {{
