@@ -239,7 +239,8 @@ DEFAULT_JSON = """{
 
 # Session ID: created once per browser page load (a reload = new session state)
 if "tp_session_id" not in st.session_state:
-    st.session_state["tp_session_id"] = f"TEST-{int(time.time())}"
+    # AgentCore requires runtimeSessionId >= 33 chars: "TEST-" (5) + 28-digit zero-padded epoch
+    st.session_state["tp_session_id"] = f"TEST-{int(time.time()):028d}"
 
 st.session_state.setdefault("tp_gen", 0)        # bumped on reset -> fresh widgets
 st.session_state.setdefault("tp_batches", 1)    # number of Input boxes
