@@ -20,7 +20,7 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 # Page config (must be the first Streamlit call)
 # ---------------------------------------------------------------------------
-st.set_page_config(page_title="Test Planner", layout="wide")
+st.set_page_config(page_title="Radiant PathPlanning Engine - Test Harness", layout="wide")
 
 # ---------------------------------------------------------------------------
 # Password protection (one-way SHA-256 hash; plaintext is never stored)
@@ -41,7 +41,7 @@ def check_password() -> bool:
             st.session_state["tp_authenticated"] = False
             st.session_state["tp_bad_password"] = True
 
-    st.title("Test Planner")
+    st.title("Radiant PathPlanning Engine - Test Harness")
     st.text_input("Password", type="password", key="tp_password", on_change=_on_submit)
     if st.session_state.get("tp_bad_password"):
         st.error("Incorrect password")
@@ -323,6 +323,7 @@ st.markdown(
 # Frozen header
 # ---------------------------------------------------------------------------
 with st.container(key="tp_header"):
+    st.title("Radiant PathPlanning Engine - Test Harness")
     test_id = st.text_input(
         "Enter Test ID",
         value=f"test-name-{date.today().isoformat()}",
@@ -434,5 +435,5 @@ with right:
                 st.markdown("Returned lines:")
                 st.code("\n".join(entry["raw_lines"]), language="text")
             if entry.get("pretty") is not None:
-                st.markdown("Returned output:")
-                st.code(json.dumps(entry["pretty"], indent=2, default=str), language="json")
+                with st.expander("Returned output"):
+                    st.code(json.dumps(entry["pretty"], indent=2, default=str), language="json")
