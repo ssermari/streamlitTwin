@@ -383,6 +383,8 @@ def run_test(idx: int, system_prompt: str, raw_json: str):
     json_part = json.dumps(parsed, separators=(",", ":"))
     prompt = f"{sys_part}  {json_part}" if sys_part else json_part
     entry["prompt"] = prompt
+    entry["sys_part"] = sys_part
+    entry["sent_json"] = parsed
 
     start = time.perf_counter()
     try:
@@ -442,7 +444,13 @@ with right:
                 st.error(entry["error"])
                 continue
             with st.expander("Prompt sent"):
-                st.code(json.dumps({"prompt": entry["prompt"]}, indent=2), language="json")
+                if entry.get("sys_part"):
+                    st.markdown("System prompt:")
+                    st.code(entry["sys_part"], language="text", wrap_lines=True)
+                st.markdown("Input JSON (incl. test_id):")
+                st.code(json.dumps(entry["sent_json"], indent=2), language="json")
+                st.caption("Exact payload sent (system prompt + compact JSON in one string):")
+                st.code(json.dumps({"prompt": entry["prompt"]}), language="json", wrap_lines=True)
             if entry.get("raw_lines"):
                 st.markdown("Returned lines:")
                 st.code("\n".join(entry["raw_lines"]), language="text")
