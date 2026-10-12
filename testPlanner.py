@@ -347,6 +347,17 @@ def run_test(idx: int, system_prompt: str, raw_json: str):
         st.session_state["tp_outputs"].append(entry)
         return
 
+    # Stamp the Test ID into the mission object (last key, overwrites any existing one)
+    mission = parsed.get("mission") if isinstance(parsed, dict) else None
+    if not isinstance(mission, dict):
+        entry["error"] = (
+            f'Input - {idx} must contain a "mission" object so the test_id can be added.'
+        )
+        st.session_state["tp_outputs"].append(entry)
+        return
+    mission.pop("test_id", None)
+    mission["test_id"] = test_id.strip()
+
     missing = [n for n, v in (("AWS_KEY", AWS_KEY), ("AWS_SECRET", AWS_SECRET),
                               ("AWS_AGENT_ARN", AGENT_ARN)) if not v]
     if missing:
