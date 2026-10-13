@@ -18,13 +18,34 @@ import boto3
 import pymongo
 from pymongo.errors import PyMongoError
 import streamlit as st
+from PIL import Image, ImageDraw
 
 # ---------------------------------------------------------------------------
 # Page config (must be the first Streamlit call)
 # ---------------------------------------------------------------------------
-PAGE_ICON = ":material/science:"  # lab beaker/flask icon, also used as the browser-tab icon
+ICON_RED = (229, 57, 53, 255)  # #E53935 - visible on light and dark tab bars
+
+
+def make_flask_icon(color=ICON_RED, size=64):
+    """Red lab-flask browser-tab icon, drawn here so it needs no image file or
+    internet access (Google's material icon is black-only and vanishes on a
+    dark tab bar). Drawn at 256 px and scaled down for smooth edges."""
+    S = 256
+    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((84, 14, 172, 44), radius=10, fill=color)          # rim
+    d.rectangle((102, 40, 154, 110), fill=color)                            # neck
+    d.polygon([(102, 106), (154, 106), (236, 214), (20, 214)], fill=color)  # cone
+    d.rounded_rectangle((18, 186, 238, 244), radius=26, fill=color)         # base
+    clear = (0, 0, 0, 0)  # liquid line + bubble cut out
+    d.polygon([(76, 168), (180, 168), (190, 180), (66, 180)], fill=clear)
+    d.ellipse((112, 124, 132, 144), fill=clear)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+TITLE_ICON = ":red[:material/science:]"  # same flask, in red, before the title
 st.set_page_config(page_title="Radiant PathPlanning Engine - Test Harness",
-                   page_icon=PAGE_ICON, layout="wide")
+                   page_icon=make_flask_icon(), layout="wide")
 
 # ---------------------------------------------------------------------------
 # Password protection (one-way SHA-256 hash; plaintext is never stored)
@@ -45,7 +66,7 @@ def check_password() -> bool:
             st.session_state["tp_authenticated"] = False
             st.session_state["tp_bad_password"] = True
 
-    st.title(f"{PAGE_ICON} Radiant PathPlanning Engine - Test Harness")
+    st.title(f"{TITLE_ICON} Radiant PathPlanning Engine - Test Harness")
     st.text_input("Password", type="password", key="tp_password", on_change=_on_submit)
     if st.session_state.get("tp_bad_password"):
         st.error("Incorrect password")
@@ -694,7 +715,7 @@ st.markdown(
 # Frozen header
 # ---------------------------------------------------------------------------
 with st.container(key="tp_header"):
-    st.title(f"{PAGE_ICON} Radiant PathPlanning Engine - Test Harness")
+    st.title(f"{TITLE_ICON} Radiant PathPlanning Engine - Test Harness")
 
     zdb, zcoll, zerr = get_zone_db()
     sel_map_name, sel_version_id = None, None
