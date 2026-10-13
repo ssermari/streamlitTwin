@@ -22,7 +22,9 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 # Page config (must be the first Streamlit call)
 # ---------------------------------------------------------------------------
-st.set_page_config(page_title="Radiant PathPlanning Engine - Test Harness", layout="wide")
+PAGE_ICON = ":material/science:"  # lab beaker/flask icon, also used as the browser-tab icon
+st.set_page_config(page_title="Radiant PathPlanning Engine - Test Harness",
+                   page_icon=PAGE_ICON, layout="wide")
 
 # ---------------------------------------------------------------------------
 # Password protection (one-way SHA-256 hash; plaintext is never stored)
@@ -43,7 +45,7 @@ def check_password() -> bool:
             st.session_state["tp_authenticated"] = False
             st.session_state["tp_bad_password"] = True
 
-    st.title("Radiant PathPlanning Engine - Test Harness")
+    st.title(f"{PAGE_ICON} Radiant PathPlanning Engine - Test Harness")
     st.text_input("Password", type="password", key="tp_password", on_change=_on_submit)
     if st.session_state.get("tp_bad_password"):
         st.error("Incorrect password")
@@ -119,6 +121,15 @@ def describe_json_error(text: str, err: json.JSONDecodeError) -> str:
     )
 
 
+def show_error(msg: str):
+    """First line as an error box; any following lines (the offending JSON
+    line and the ^ pointer) in a monospaced block so the pointer lines up."""
+    first, _, rest = msg.partition("\n")
+    st.error(first)
+    if rest.strip():
+        st.code(rest, language="text")
+
+
 def parse_meta_prompt(text: str):
     """(dict, error_message). Blank = no extra fields; otherwise it must be a
     JSON object, since its fields are merged into the mission."""
@@ -127,7 +138,7 @@ def parse_meta_prompt(text: str):
     try:
         meta = json.loads(text)
     except json.JSONDecodeError as e:
-        return None, f"Meta Prompt is not valid JSON:\n{describe_json_error(text, e)}"
+        return None, f"Meta Prompt is not valid JSON: {describe_json_error(text, e)}"
     if not isinstance(meta, dict):
         return None, ("Meta Prompt must be a JSON object, e.g. "
                       '{"carrier_type": "C52X52"}')
@@ -602,30 +613,6 @@ def list_zone_map_versions(db, coll, map_name):
 # ---------------------------------------------------------------------------
 # CSS: frozen header, 100-char Test ID box, orange "ran" buttons
 # ---------------------------------------------------------------------------
-LIGHT_BG, DARK_BG = "#FFFFFF", "#0E1117"  # Streamlit's built-in theme backgrounds
-
-
-def header_bg_css() -> str:
-    """Background for the frozen header that matches the active theme."""
-    custom = st.get_option("theme.backgroundColor")
-    if custom:  # an explicit theme colour in config.toml always wins
-        return f"background-color: {custom};"
-    theme_type = None
-    try:  # Streamlit >= 1.46 reports the theme the browser is actually showing
-        theme_type = st.context.theme.type
-    except Exception:
-        pass
-    if theme_type in ("light", "dark"):
-        return f"background-color: {DARK_BG if theme_type == 'dark' else LIGHT_BG};"
-    # Older Streamlit: follow the OS/browser setting (Streamlit's default mode)
-    return (
-        f"background-color: {LIGHT_BG};"
-        f"}} @media (prefers-color-scheme: dark) {{ .st-key-tp_header {{"
-        f" background-color: {DARK_BG};"
-    )
-
-
-bg_css = header_bg_css()
 ran_css = "\n".join(
     f"""
     .st-key-run_{gen}_{i} button {{
@@ -646,18 +633,47 @@ st.markdown(
     [data-testid="stHeader"] {{
         background: transparent !important;
     }}
+    /* Frozen header. Newer Streamlit wraps each container in a
+       stLayoutWrapper exactly as tall as the container, which leaves a
+       sticky element nowhere to stick, so pin the wrapper instead. The rule
+       on the container itself covers older Streamlit without the wrapper. */
+    [data-testid="stLayoutWrapper"]:has(> .st-key-tp_header) {{
+        position: sticky;
+        top: 0;
+        z-index: 999;
+    }}
     .st-key-tp_header {{
         position: sticky;
         top: 0;
         z-index: 999;
         padding-top: 0.25rem;
-        {bg_css}
+        padding-bottom: 0.75rem;
+        border-bottom: 1px solid rgba(128, 128, 128, 0.45);  /* the header divider */
+    }}
+    /* Header background = the page background in any theme, updated live:
+       Streamlit paints the theme colour on .stApp, and every element
+       between it and the header (all transparent anyway) inherits it, so
+       the header always matches, even after switching light/dark. */
+    .stApp :has(.st-key-tp_header), .st-key-tp_header {{
+        background-color: inherit !important;
     }}
     .st-key-tp_header h1 {{
+        font-size: 2.25rem !important;  /* slightly smaller than Streamlit's 2.75rem */
         padding-top: 0 !important;
         padding-bottom: 0.25rem !important;
     }}
-    .st-key-tp_header hr {{ margin: 0.5rem 0 0 0; }}
+    /* Meta Prompt: one line tall by default, user can drag it taller */
+    .st-key-tp_header [class*="st-key-meta_"] [data-testid="stTextAreaRootElement"] {{
+        height: auto !important;
+        min-height: 0 !important;
+    }}
+    .st-key-tp_header [class*="st-key-meta_"] textarea {{
+        height: 40px;
+        min-height: 40px !important;
+        padding-top: 8px !important;
+        padding-bottom: 8px !important;
+        resize: vertical !important;
+    }}
     [class*="st-key-testid_"] {{
         width: calc(100ch + 2rem) !important;
         max-width: 100% !important;
@@ -672,11 +688,13 @@ st.markdown(
 # Frozen header
 # ---------------------------------------------------------------------------
 with st.container(key="tp_header"):
-    st.title("Radiant PathPlanning Engine - Test Harness")
+    st.title(f"{PAGE_ICON} Radiant PathPlanning Engine - Test Harness")
 
     zdb, zcoll, zerr = get_zone_db()
     sel_map_name, sel_version_id = None, None
-    mc1, mc2, _mc3 = st.columns([2, 2, 3])
+    mc1, mc2, mc3, _mc4 = st.columns([2, 2, 1.2, 1.8], vertical_alignment="bottom")
+    with mc3:
+        st.button("CLEAR AND RESET", on_click=reset_all, use_container_width=True)
     if zerr:
         st.error(zerr)
     else:
@@ -706,8 +724,18 @@ with st.container(key="tp_header"):
         value=f"test-name-{date.today().isoformat()}",
         key=f"testid_{gen}",
     )
-    st.button("CLEAR AND RESET", on_click=reset_all)
-    st.markdown("---")
+    meta_raw = st.text_area(
+        "Meta Prompt",
+        value=META_PROMPT_DEFAULT,
+        key=meta_key,
+        height=68,  # Streamlit's minimum; CSS below trims it to one line
+        help="Meta Prompt fields as a JSON object, such as carrier type. They are "
+             "added to the mission right after test_id / map. Drag the bottom-right "
+             "corner to make the box taller.",
+    )
+    _, _meta_err = parse_meta_prompt(meta_raw)
+    if _meta_err:
+        show_error(_meta_err)
 
 # ---------------------------------------------------------------------------
 # Body: left = inputs, right = outputs
@@ -728,7 +756,7 @@ def run_test(idx: int, meta_raw: str, raw_json: str):
     try:
         parsed = json.loads(raw_json)
     except json.JSONDecodeError as e:
-        entry["error"] = f"Input - {idx} is not valid JSON:\n{describe_json_error(raw_json, e)}"
+        entry["error"] = f"Input - {idx} is not valid JSON: {describe_json_error(raw_json, e)}"
         st.session_state["tp_outputs"].append(entry)
         return
 
@@ -789,17 +817,6 @@ def run_test(idx: int, meta_raw: str, raw_json: str):
 
 
 with left:
-    meta_raw = st.text_area(
-        "Meta Prompt",
-        value=META_PROMPT_DEFAULT,
-        key=meta_key,
-        height=100,  # ~3 lines
-    )
-    st.caption("Enter Meta Prompt fields as a JSON object, such as carrier type. "
-               "They are added to the mission right after test_id / map.")
-    _, _meta_err = parse_meta_prompt(meta_raw)
-    if _meta_err:
-        st.error(_meta_err)
 
     # Input defaults depend on the selected map. A box still holding an
     # untouched default follows map changes; an edited box is left alone.
@@ -840,7 +857,7 @@ with right:
                     f"**Executed planning input - {entry['idx']} in {entry['seconds']:.2f} seconds.**"
                 )
             if entry.get("error"):
-                st.error(entry["error"])
+                show_error(entry["error"])
                 continue
             with st.expander("Prompt sent"):
                 st.markdown("Mission JSON (incl. test_id, map and Meta Prompt):")
