@@ -1,0 +1,79 @@
+{
+  "mission": {
+    "carriers": [
+      {
+        "carrier_id": "s1",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s2",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s3",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s4",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s5",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s6",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s7",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s8",
+        "parked": true
+      },
+      {
+        "carrier_id": "s9",
+        "parked": true
+      },
+      {
+        "carrier_id": "s10",
+        "parked": true
+      },
+      {
+        "carrier_id": "s11",
+        "parked": true
+      },
+      {
+        "carrier_id": "s12",
+        "parked": true
+      },
+      {
+        "carrier_id": "s13",
+        "parked": true
+      },
+      {
+        "carrier_id": "s14",
+        "parked": true
+      },
+      {
+        "carrier_id": "e1",
+        "flow": "induct_build"
+      },
+      {
+        "carrier_id": "e2",
+        "flow": "induct_build"
+      },
+      {
+        "carrier_id": "e3",
+        "flow": "induct_build"
+      }
+    ],
+    "test_id": "flow20-2026-09-30",
+    "continue": true,
+    "write": true,
+    "parked_carriers": 28,
+    "budget_s": 20
+  }
+}

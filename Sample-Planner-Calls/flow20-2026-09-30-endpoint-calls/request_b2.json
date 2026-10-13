@@ -1,0 +1,89 @@
+{ 
+  "mission": {
+    "carriers": [
+      {
+        "carrier_id": "s1",
+        "flow": "load_stow"
+      },
+      {
+        "carrier_id": "s2",
+        "flow": "load_stow"
+      },
+      {
+        "carrier_id": "s3",
+        "flow": "load_stow"
+      },
+      {
+        "carrier_id": "s4",
+        "flow": "load_stow"
+      },
+      {
+        "carrier_id": "s5",
+        "flow": "load_stow"
+      },
+      {
+        "carrier_id": "s6",
+        "flow": "load_stow"
+      },
+      {
+        "carrier_id": "s7",
+        "flow": "load_stow"
+      },
+      {
+        "carrier_id": "e1",
+        "flow": "build_pick"
+      },
+      {
+        "carrier_id": "e2",
+        "flow": "build_pick"
+      },
+      {
+        "carrier_id": "e3",
+        "flow": "build_pick"
+      },
+      {
+        "carrier_id": "s8",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s9",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s10",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s11",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s12",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s13",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s14",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "e4",
+        "flow": "induct_build"
+      },
+      {
+        "carrier_id": "e5",
+        "flow": "induct_build"
+      },
+      {
+        "carrier_id": "e6",
+        "flow": "induct_build"
+      }
+    ],
+    "continue": true,
+    "write": true,
+    "budget_s": 20
+  }
+}

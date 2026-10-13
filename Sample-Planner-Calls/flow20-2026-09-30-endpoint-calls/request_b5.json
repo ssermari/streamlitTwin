@@ -1,0 +1,90 @@
+{
+  "mission": {
+    "carriers": [
+      {
+        "carrier_id": "s8",
+        "flow": "load_stow"
+      },
+      {
+        "carrier_id": "s9",
+        "flow": "load_stow"
+      },
+      {
+        "carrier_id": "s10",
+        "flow": "load_stow"
+      },
+      {
+        "carrier_id": "s11",
+        "flow": "load_stow"
+      },
+      {
+        "carrier_id": "s12",
+        "flow": "load_stow"
+      },
+      {
+        "carrier_id": "s13",
+        "flow": "load_stow"
+      },
+      {
+        "carrier_id": "s14",
+        "flow": "load_stow"
+      },
+      {
+        "carrier_id": "e10",
+        "flow": "build_pick"
+      },
+      {
+        "carrier_id": "e11",
+        "flow": "build_pick"
+      },
+      {
+        "carrier_id": "e12",
+        "flow": "build_pick"
+      },
+      {
+        "carrier_id": "s1",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s2",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s3",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s4",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s5",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s6",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "s7",
+        "flow": "stow_load"
+      },
+      {
+        "carrier_id": "e13",
+        "flow": "induct_build"
+      },
+      {
+        "carrier_id": "e14",
+        "flow": "induct_build"
+      },
+      {
+        "carrier_id": "e15",
+        "flow": "induct_build"
+      }
+    ],
+    "test_id": "flow20-2026-09-30",
+    "continue": true,
+    "write": true,
+    "budget_s": 20
+  }
+}

@@ -1,0 +1,265 @@
+{
+  "mission": {
+    "test_id": "week7-sort-run-2026-10-13",
+    "map": "Sortation-Example-1",
+    "carrier_type": "C9X9",
+    "pallets": [
+      {
+        "carrier_id": "m1",
+        "start": "L1",
+        "steps": [
+          {
+            "flow": "put_pick",
+            "pick_station": "P6"
+          },
+          "pick_put",
+          {
+            "flow": "put_pick",
+            "pick_station": "P3"
+          },
+          "pick_put"
+        ]
+      },
+      {
+        "carrier_id": "m2",
+        "start": "L2",
+        "steps": [
+          {
+            "flow": "put_pick",
+            "pick_station": "P7"
+          },
+          "pick_put",
+          {
+            "flow": "put_pick",
+            "pick_station": "P11"
+          },
+          "pick_put"
+        ]
+      },
+      {
+        "carrier_id": "m3",
+        "start": "L3",
+        "steps": [
+          {
+            "flow": "put_pick",
+            "pick_station": "P1"
+          },
+          "pick_put",
+          {
+            "flow": "put_pick",
+            "pick_station": "P2"
+          },
+          "pick_put"
+        ]
+      },
+      {
+        "carrier_id": "m4",
+        "start": "L4",
+        "steps": [
+          {
+            "flow": "put_pick",
+            "pick_station": "P9"
+          },
+          "pick_put",
+          {
+            "flow": "put_pick",
+            "pick_station": "P2"
+          },
+          "pick_put"
+        ]
+      },
+      {
+        "carrier_id": "m5",
+        "start": "L5",
+        "steps": [
+          {
+            "flow": "put_pick",
+            "pick_station": "P6"
+          },
+          "pick_put",
+          {
+            "flow": "put_pick",
+            "pick_station": "P10"
+          },
+          "pick_put"
+        ]
+      },
+      {
+        "carrier_id": "m6",
+        "start": "L6",
+        "steps": [
+          {
+            "flow": "put_pick",
+            "pick_station": "P1"
+          },
+          "pick_put",
+          {
+            "flow": "put_pick",
+            "pick_station": "P9"
+          },
+          "pick_put"
+        ]
+      },
+      {
+        "carrier_id": "m7",
+        "start": "L7",
+        "steps": [
+          {
+            "flow": "put_pick",
+            "pick_station": "P4"
+          },
+          "pick_put",
+          {
+            "flow": "put_pick",
+            "pick_station": "P1"
+          },
+          "pick_put"
+        ]
+      },
+      {
+        "carrier_id": "m8",
+        "start": "L8",
+        "steps": [
+          {
+            "flow": "put_pick",
+            "pick_station": "P2"
+          },
+          "pick_put",
+          {
+            "flow": "put_pick",
+            "pick_station": "P7"
+          },
+          "pick_put"
+        ]
+      },
+      {
+        "carrier_id": "m9",
+        "start": "L9",
+        "steps": [
+          {
+            "flow": "put_pick",
+            "pick_station": "P7"
+          },
+          "pick_put",
+          {
+            "flow": "put_pick",
+            "pick_station": "P2"
+          },
+          "pick_put"
+        ]
+      },
+      {
+        "carrier_id": "m10",
+        "start": "L10",
+        "steps": [
+          {
+            "flow": "put_pick",
+            "pick_station": "P4"
+          },
+          "pick_put",
+          {
+            "flow": "put_pick",
+            "pick_station": "P2"
+          },
+          "pick_put"
+        ]
+      },
+      {
+        "carrier_id": "m11",
+        "start": "L11",
+        "steps": [
+          {
+            "flow": "put_pick",
+            "pick_station": "P9"
+          },
+          "pick_put",
+          {
+            "flow": "put_pick",
+            "pick_station": "P7"
+          },
+          "pick_put"
+        ]
+      },
+      {
+        "carrier_id": "m12",
+        "start": "L12",
+        "steps": [
+          {
+            "flow": "put_pick",
+            "pick_station": "P1"
+          },
+          "pick_put",
+          {
+            "flow": "put_pick",
+            "pick_station": "P10"
+          },
+          "pick_put"
+        ]
+      },
+      {
+        "carrier_id": "m13",
+        "start": "L13",
+        "steps": [
+          {
+            "flow": "put_pick",
+            "pick_station": "P2"
+          },
+          "pick_put",
+          {
+            "flow": "put_pick",
+            "pick_station": "P4"
+          },
+          "pick_put"
+        ]
+      },
+      {
+        "carrier_id": "m14",
+        "start": "L14",
+        "steps": [
+          {
+            "flow": "put_pick",
+            "pick_station": "P11"
+          },
+          "pick_put",
+          {
+            "flow": "put_pick",
+            "pick_station": "P11"
+          },
+          "pick_put"
+        ]
+      },
+      {
+        "carrier_id": "m15",
+        "start": "L15",
+        "steps": [
+          {
+            "flow": "put_pick",
+            "pick_station": "P10"
+          },
+          "pick_put",
+          {
+            "flow": "put_pick",
+            "pick_station": "P1"
+          },
+          "pick_put"
+        ]
+      },
+      {
+        "carrier_id": "m16",
+        "start": "L16",
+        "steps": [
+          {
+            "flow": "put_pick",
+            "pick_station": "P10"
+          },
+          "pick_put",
+          {
+            "flow": "put_pick",
+            "pick_station": "P10"
+          },
+          "pick_put"
+        ]
+      }
+    ]
+  }
+}
