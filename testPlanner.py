@@ -534,10 +534,12 @@ SORTATION_DEFAULT_JSON = """{
 }"""
 
 
+def is_sortation_map(map_name) -> bool:
+    return bool(map_name) and str(map_name).lower().startswith("sortation")
+
+
 def default_input_json(map_name) -> str:
-    if map_name and str(map_name).lower().startswith("sortation"):
-        return SORTATION_DEFAULT_JSON
-    return DEFAULT_JSON
+    return SORTATION_DEFAULT_JSON if is_sortation_map(map_name) else DEFAULT_JSON
 
 
 # Session ID: created once per browser page load (a reload = new session state)
@@ -571,6 +573,11 @@ SESSION_ID = st.session_state["tp_session_id"]
 # ---------------------------------------------------------------------------
 DEFAULT_ZONE_MAP_COLLECTION = "target_logical_maps"
 META_PROMPT_DEFAULT = '{"carrier_type": "C52X52"}'
+SORTATION_META_PROMPT_DEFAULT = ""  # Sortation maps: no Meta Prompt by default
+
+
+def default_meta_prompt(map_name) -> str:
+    return SORTATION_META_PROMPT_DEFAULT if is_sortation_map(map_name) else META_PROMPT_DEFAULT
 
 
 @st.cache_resource
@@ -723,9 +730,15 @@ with st.container(key="tp_header"):
         value=f"test-name-{date.today().isoformat()}",
         key=f"testid_{gen}",
     )
+    # Meta Prompt default depends on the selected map; an untouched default
+    # follows map changes, an edited Meta Prompt is left alone.
+    _want_meta = default_meta_prompt(sel_map_name)
+    _cur_meta = st.session_state.get(meta_key)
+    if _cur_meta is None or (_cur_meta in (META_PROMPT_DEFAULT, SORTATION_META_PROMPT_DEFAULT)
+                             and _cur_meta != _want_meta):
+        st.session_state[meta_key] = _want_meta
     meta_raw = st.text_area(
         "Meta Prompt",
-        value=META_PROMPT_DEFAULT,
         key=meta_key,
         height=68,  # Streamlit's minimum; CSS below trims it to one line
         help="Meta Prompt fields as a JSON object, such as carrier type. They are "
