@@ -270,7 +270,6 @@ DEFAULT_JSON = """{
 # at run time.
 SORTATION_DEFAULT_JSON = """{
   "mission": {
-    "test_id": "week7-sort-run-2026-10-13",
     "map": "Sortation-Example-1",
     "carrier_type": "C9X9",
     "pallets": [
@@ -768,12 +767,16 @@ def run_test(idx: int, meta_raw: str, raw_json: str):
         )
         st.session_state["tp_outputs"].append(entry)
         return
-    # test_id: replaced in place if the input already has one, otherwise
-    # appended at the end. Right after it come "map" (the selected map name,
-    # or with no map selected any "map" typed in the input) and then every
-    # Meta Prompt field, which replaces the same field in the input.
+    # test_id: replaced in place if the input already has one; otherwise it
+    # takes the place of the input's "map" if there is one, else it goes at
+    # the end. Right after it come "map" (the selected map name, or with no
+    # map selected any "map" typed in the input) and then every Meta Prompt
+    # field, which replaces the same field in the input.
     map_value = sel_map_name if sel_map_name else mission.get("map")
     meta = {k: v for k, v in meta.items() if k not in ("test_id", "map")}
+    if "test_id" not in mission and "map" in mission:
+        mission = {("test_id" if k == "map" else k): v for k, v in mission.items()}
+        parsed["mission"] = mission
     for k in ("map", *meta):
         mission.pop(k, None)
     if "test_id" not in mission:
